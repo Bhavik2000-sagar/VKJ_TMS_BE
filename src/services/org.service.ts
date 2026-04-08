@@ -131,12 +131,16 @@ export async function listDepartmentsPaginated(input: {
         createdAt: true,
         updatedAt: true,
         branch: { select: { id: true, name: true } },
+        _count: { select: { users: true } },
       },
     }),
   ]);
 
   return {
-    items,
+    items: items.map((d) => {
+      const { _count, ...rest } = d;
+      return { ...rest, usersCount: _count.users };
+    }),
     total,
   };
 }
