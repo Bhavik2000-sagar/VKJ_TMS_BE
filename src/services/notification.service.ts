@@ -9,6 +9,11 @@ export async function createNotification(input: {
   taskId?: string | null;
   metadata?: object | null;
 }) {
+  const user = await prisma.user.findUnique({
+    where: { id: input.userId },
+    select: { notificationEnabled: true },
+  });
+  if (!user?.notificationEnabled) return null;
   const n = await prisma.notification.create({
     data: {
       userId: input.userId,

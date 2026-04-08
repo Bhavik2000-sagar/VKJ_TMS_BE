@@ -98,6 +98,12 @@ router.get("/", requirePermission("task.update"), async (req, res) => {
         .enum(["all", "my", "given", "support", "review"])
         .optional()
         .transform((s) => (s && s !== "all" ? s : undefined)),
+      meetingId: z
+        .string()
+        .optional()
+        .transform((s) =>
+          s && String(s).trim() ? String(s).trim() : undefined,
+        ),
     })
     .parse(req.query);
 
@@ -113,6 +119,7 @@ router.get("/", requirePermission("task.update"), async (req, res) => {
       dueFrom: q.dueFrom,
       dueTo: q.dueTo,
       search: q.search,
+      meetingId: q.meetingId,
       sortBy: q.sortBy,
       sortDir: q.sortDir,
     },
@@ -147,6 +154,7 @@ router.post("/", requirePermission("task.create"), async (req, res) => {
       startDate: z.string().optional().nullable(),
       dueDate: z.string().optional().nullable(),
       estimatedMinutes: z.number().optional().nullable(),
+      meetingId: z.string().optional().nullable(),
     })
     .parse(req.body);
   const parseDate = (s: string | null | undefined) =>
@@ -155,6 +163,9 @@ router.post("/", requirePermission("task.create"), async (req, res) => {
     ...body,
     startDate: parseDate(body.startDate),
     dueDate: parseDate(body.dueDate),
+    ...(body.meetingId
+      ? { meetingId: body.meetingId, createdFrom: "MEETING" }
+      : {}),
   });
   res.status(201).json({ task });
 });
@@ -346,31 +357,43 @@ router.post(
   },
 );
 
-router.get("/:id/checklist", requirePermission("task.update"), async (req, res) => {
-  const params = z.object({ id: z.string().min(1) }).parse(req.params);
-  const items = await taskService.listTaskChecklistItems(req.userId!, req.tenantId!, params.id);
-  if (!items) {
-    res.status(404).json({ error: "Not found" });
-    return;
-  }
-  res.json({ items });
-});
+router.get(
+  "/:id/checklist",
+  requirePermission("task.update"),
+  async (req, res) => {
+    const params = z.object({ id: z.string().min(1) }).parse(req.params);
+    const items = await taskService.listTaskChecklistItems(
+      req.userId!,
+      req.tenantId!,
+      params.id,
+    );
+    if (!items) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    res.json({ items });
+  },
+);
 
-router.post("/:id/checklist/apply-template", requirePermission("task.update"), async (req, res) => {
-  const params = z.object({ id: z.string().min(1) }).parse(req.params);
-  const body = z.object({ templateId: z.string().min(1) }).parse(req.body);
-  const items = await taskService.applyTemplateChecklistToTask(
-    req.userId!,
-    req.tenantId!,
-    params.id,
-    body.templateId,
-  );
-  if (!items) {
-    res.status(404).json({ error: "Not found" });
-    return;
-  }
-  res.status(201).json({ items });
-});
+router.post(
+  "/:id/checklist/apply-template",
+  requirePermission("task.update"),
+  async (req, res) => {
+    const params = z.object({ id: z.string().min(1) }).parse(req.params);
+    const body = z.object({ templateId: z.string().min(1) }).parse(req.body);
+    const items = await taskService.applyTemplateChecklistToTask(
+      req.userId!,
+      req.tenantId!,
+      params.id,
+      body.templateId,
+    );
+    if (!items) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    res.status(201).json({ items });
+  },
+);
 
 router.patch(
   "/:id/checklist/:itemId",

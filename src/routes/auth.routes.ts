@@ -124,6 +124,8 @@ router.get("/me", authMiddleware, async (req, res) => {
       name: req.user!.name,
       phone: req.user!.phone,
       birthDate: req.user!.birthDate,
+      notificationEnabled: req.user!.notificationEnabled,
+      themePreference: req.user!.themePreference,
       tenantId: req.user!.tenantId,
       roleCode: req.user!.role?.code,
     },
@@ -137,6 +139,8 @@ router.patch("/me", authMiddleware, async (req, res) => {
       name: z.string().trim().min(1).max(120).optional(),
       phone: z.string().trim().min(1).max(40).optional().nullable(),
       birthDate: z.coerce.date().optional().nullable(),
+      notificationEnabled: z.coerce.boolean().optional(),
+      themePreference: z.enum(["light", "dark"]).optional(),
     })
     .parse(req.body);
 
@@ -146,6 +150,12 @@ router.patch("/me", authMiddleware, async (req, res) => {
       ...(body.name != null ? { name: body.name } : {}),
       ...(body.phone !== undefined ? { phone: body.phone } : {}),
       ...(body.birthDate !== undefined ? { birthDate: body.birthDate } : {}),
+      ...(body.notificationEnabled !== undefined
+        ? { notificationEnabled: body.notificationEnabled }
+        : {}),
+      ...(body.themePreference !== undefined
+        ? { themePreference: body.themePreference }
+        : {}),
     },
     select: {
       id: true,
@@ -153,6 +163,8 @@ router.patch("/me", authMiddleware, async (req, res) => {
       name: true,
       phone: true,
       birthDate: true,
+      notificationEnabled: true,
+      themePreference: true,
       tenantId: true,
       role: { select: { code: true } },
     },
@@ -165,10 +177,31 @@ router.patch("/me", authMiddleware, async (req, res) => {
       name: user.name,
       phone: user.phone,
       birthDate: user.birthDate,
+      notificationEnabled: user.notificationEnabled,
+      themePreference: user.themePreference,
       tenantId: user.tenantId,
       roleCode: user.role?.code,
     },
   });
+});
+
+router.post("/change-password", authMiddleware, async (req, res) => {
+  const body = z
+    .object({
+      currentPassword: z.string().min(1),
+      newPassword: z.string().min(8).max(200),
+    })
+    .parse(req.body);
+  try {
+    await authService.changePassword(
+      req.user!.id,
+      body.currentPassword,
+      body.newPassword,
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message });
+  }
 });
 
 router.post("/accept-invite", async (req, res) => {

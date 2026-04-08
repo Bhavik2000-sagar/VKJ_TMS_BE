@@ -140,6 +140,7 @@ export async function listTasksPaginated(
     dueFrom?: Date;
     dueTo?: Date;
     search?: string;
+    meetingId?: string;
     sortBy: TaskListSortField;
     sortDir: "asc" | "desc";
   },
@@ -160,6 +161,7 @@ export async function listTasksPaginated(
       OR: [{ title: { contains: q } }, { description: { contains: q } }],
     });
   }
+  if (params.meetingId) andFilters.push({ meetingId: params.meetingId });
 
   const where: Prisma.TaskWhereInput = {
     tenantId,
@@ -236,6 +238,8 @@ export async function createTask(
     startDate?: Date | null;
     dueDate?: Date | null;
     estimatedMinutes?: number | null;
+    meetingId?: string | null;
+    createdFrom?: "TASK" | "MEETING";
   },
 ) {
   const task = await prisma.task.create({
@@ -245,6 +249,8 @@ export async function createTask(
       description: data.description,
       statusId: data.statusId,
       priority: data.priority ?? "MEDIUM",
+      createdFrom: data.createdFrom ?? "TASK",
+      meetingId: data.meetingId ?? null,
       taskType: data.taskType ?? "GENERAL",
       assignedToId: data.assignedToId,
       reviewerId: data.reviewerId,

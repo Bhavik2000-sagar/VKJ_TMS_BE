@@ -28,6 +28,12 @@ enum TenantStatus {
   INACTIVE
 }
 
+enum MeetingStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
 model Tenant {
   id        String   @id @default(cuid())
   name      String
@@ -105,6 +111,8 @@ model User {
   passwordHash String
   name         String
   isActive     Boolean  @default(true)
+  notificationEnabled Boolean @default(true)
+  themePreference String @default("light")
   roleId       String
   managerId    String?
   branchId     String?
@@ -212,6 +220,8 @@ model Task {
   description      String?   @db.Text
   statusId         String
   priority         String    @default("MEDIUM")
+  createdFrom      String    @default("TASK")
+  meetingId        String?
   assignedToId     String?
   reviewerId       String?
   supporterId      String?
@@ -232,6 +242,7 @@ model Task {
 
   tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   status      TaskStatus @relation(fields: [statusId], references: [id])
+  meeting     Meeting?   @relation(fields: [meetingId], references: [id], onDelete: SetNull)
   assignedTo  User?      @relation("TaskAssigned", fields: [assignedToId], references: [id])
   reviewer    User?      @relation("TaskReviewer", fields: [reviewerId], references: [id])
   supporter   User?      @relation("TaskSupporter", fields: [supporterId], references: [id])
@@ -246,6 +257,7 @@ model Task {
   @@index([tenantId])
   @@index([assignedToId])
   @@index([createdById])
+  @@index([meetingId])
   @@index([branchId])
   @@index([departmentId])
 }
@@ -304,6 +316,11 @@ model Meeting {
   tenantId    String
   title       String
   agenda      String?  @db.Text
+  meetingLink String?
+  preparationNotes String? @db.Text
+  priority    String   @default("MEDIUM")
+  durationMinutes Int? @default(30)
+  status      MeetingStatus @default(SCHEDULED)
   datetime    DateTime
   createdById String
   createdAt   DateTime @default(now())
@@ -311,6 +328,7 @@ model Meeting {
 
   tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   createdBy User   @relation("MeetingCreator", fields: [createdById], references: [id])
+  tasks     Task[]
   attendees MeetingAttendee[]
   outcomes  MeetingOutcome[]
 
