@@ -1,5 +1,17 @@
 import "dotenv/config";
 import { z } from "zod";
+const envBoolean = z.preprocess((value) => {
+    if (typeof value === "boolean")
+        return value;
+    if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (["true", "1", "yes", "on"].includes(normalized))
+            return true;
+        if (["false", "0", "no", "off"].includes(normalized))
+            return false;
+    }
+    return value;
+}, z.boolean());
 const schema = z.object({
     NODE_ENV: z
         .enum(["development", "production", "test"])
@@ -22,13 +34,13 @@ const schema = z.object({
     // SMTP (preferred keys)
     SMTP_HOST: z.string().optional(),
     SMTP_PORT: z.coerce.number().optional(),
-    SMTP_SECURE: z.coerce.boolean().optional(),
+    SMTP_SECURE: envBoolean.optional(),
     SMTP_USER: z.string().optional(),
     SMTP_PASS: z.string().optional(),
     // Email (legacy alias keys; supported for convenience)
     EMAIL_HOST: z.string().optional(),
     EMAIL_PORT: z.coerce.number().optional(),
-    EMAIL_SECURE: z.coerce.boolean().optional(),
+    EMAIL_SECURE: envBoolean.optional(),
     EMAIL_USER: z.string().optional(),
     EMAIL_PASS: z.string().optional(),
     EMAIL_FROM: z.string().optional(),

@@ -2,6 +2,7 @@ export declare function sendTenantInvitationEmail(opts: {
     to: string;
     tenantName: string;
     inviteLink: string;
+    isReinvite?: boolean;
 }): Promise<{
     skipped: true;
 } | {

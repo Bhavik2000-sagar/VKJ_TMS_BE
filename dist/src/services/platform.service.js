@@ -107,6 +107,7 @@ async function createAndSendTenantInvitation(input) {
             to: email,
             tenantName: input.tenantName,
             inviteLink,
+            isReinvite: input.isReinvite,
         });
     }
     catch (e) {
@@ -171,6 +172,7 @@ export async function reinviteTenantAdmin(input) {
         tenantId: tenant.id,
         tenantName: tenant.name,
         email: last.email,
+        isReinvite: true,
     });
     await prisma.tenant.update({
         where: { id: tenant.id },

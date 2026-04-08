@@ -112,6 +112,7 @@ async function createAndSendTenantInvitation(input: {
   tenantId: string;
   tenantName: string;
   email: string;
+  isReinvite?: boolean;
 }) {
   const email = input.email.trim().toLowerCase();
 
@@ -140,6 +141,7 @@ async function createAndSendTenantInvitation(input: {
       to: email,
       tenantName: input.tenantName,
       inviteLink,
+      isReinvite: input.isReinvite,
     });
   } catch (e) {
     // We still want tenant provisioning to succeed even if SMTP is misconfigured.
@@ -221,6 +223,7 @@ export async function reinviteTenantAdmin(input: { tenantId: string }) {
     tenantId: tenant.id,
     tenantName: tenant.name,
     email: last.email,
+    isReinvite: true,
   });
 
   await prisma.tenant.update({

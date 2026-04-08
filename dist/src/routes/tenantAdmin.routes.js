@@ -14,7 +14,9 @@ router.get("/users", requirePermission("user.manage"), async (req, res) => {
         page: z.coerce.number().int().min(1).default(1),
         pageSize: z.coerce.number().int().min(1).max(100).default(10),
         search: z.string().trim().optional(),
-        sortBy: z.enum(["name", "email", "employeeCode", "createdAt"]).default("createdAt"),
+        sortBy: z
+            .enum(["name", "email", "employeeCode", "createdAt"])
+            .default("createdAt"),
         sortDir: z.enum(["asc", "desc"]).default("desc"),
     })
         .parse(req.query);
@@ -223,7 +225,9 @@ router.delete("/users/:id", requirePermission("user.manage"), async (req, res) =
     res.status(204).send();
 });
 router.get("/permissions-catalog", requirePermission("user.manage"), async (_req, res) => {
-    const permissions = await prisma.permission.findMany({ orderBy: { module: "asc" } });
+    const permissions = await prisma.permission.findMany({
+        orderBy: { module: "asc" },
+    });
     res.json({ permissions });
 });
 router.get("/roles", requirePermission("user.manage"), async (req, res) => {
@@ -276,7 +280,9 @@ router.post("/roles", requirePermission("role.manage"), async (req, res) => {
     res.status(201).json({ role });
 });
 router.get("/permissions", requirePermission("role.manage"), async (_req, res) => {
-    const permissions = await prisma.permission.findMany({ orderBy: { module: "asc" } });
+    const permissions = await prisma.permission.findMany({
+        orderBy: { module: "asc" },
+    });
     res.json({ permissions });
 });
 export default router;
