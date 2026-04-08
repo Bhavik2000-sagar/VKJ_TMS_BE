@@ -14,7 +14,11 @@ import reportRoutes from "./routes/report.routes.js";
 import tenantAdminRoutes from "./routes/tenantAdmin.routes.js";
 import teamRoutes from "./routes/team.routes.js";
 import orgRoutes from "./routes/org.routes.js";
-import { apiErrorHandler, notFoundHandler } from "./middleware/error.middleware.js";
+import eodRoutes from "./routes/eod.routes.js";
+import {
+  apiErrorHandler,
+  notFoundHandler,
+} from "./middleware/error.middleware.js";
 
 export function createApp() {
   const app = express();
@@ -42,6 +46,7 @@ export function createApp() {
   app.use("/api/tenant", tenantAdminRoutes);
   app.use("/api/team", teamRoutes);
   app.use("/api/org", orgRoutes);
+  app.use("/api/eod", eodRoutes);
 
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 

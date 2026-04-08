@@ -18,6 +18,8 @@ router.get("/members", requirePermission("team.view"), async (req, res) => {
       pageSize: z.coerce.number().int().min(1).max(100).default(10),
       search: z.string().trim().optional(),
       departmentId: z.string().min(1).optional(),
+      roleId: z.string().min(1).optional(),
+      status: z.enum(["active", "inactive"]).optional(),
       sortBy: z
         .enum(["name", "email", "employeeCode", "createdAt"])
         .default("createdAt"),
@@ -29,6 +31,10 @@ router.get("/members", requirePermission("team.view"), async (req, res) => {
   const where = {
     tenantId: req.tenantId!,
     ...(query.departmentId ? { departmentId: query.departmentId } : {}),
+    ...(query.roleId ? { roleId: query.roleId } : {}),
+    ...(query.status
+      ? { isActive: query.status === "active" ? true : false }
+      : {}),
     ...(term
       ? {
           OR: [
