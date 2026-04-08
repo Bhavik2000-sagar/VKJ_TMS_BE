@@ -1,0 +1,51 @@
+import type { RequestHandler } from "express";
+import { prisma } from "../lib/prisma.js";
+import { verifyAccessToken } from "../utils/jwt.js";
+import { getEffectivePermissionActions } from "../services/permission.service.js";
+import { getAccessCookieName } from "../services/auth.service.js";
+
+export const authMiddleware: RequestHandler = async (req, res, next) => {
+  const token = req.cookies?.[getAccessCookieName()];
+  if (!token) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  try {
+    const payload = verifyAccessToken(token);
+    req.userId = payload.sub;
+    req.tenantId = payload.tid;
+    const user = await prisma.user.findUnique({
+      where: { id: payload.sub },
+      include: { role: true, tenant: true },
+    });
+    if (!user) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    if (user.tenant && user.tenant.status === "INACTIVE") {
+      res.status(403).json({ error: "Tenant inactive" });
+      return;
+    }
+    req.user = user;
+    req.effectivePermissions = await getEffectivePermissionActions(user.id);
+    next();
+  } catch {
+    res.status(401).json({ error: "Unauthorized" });
+  }
+};
+
+export const requireTenantUser: RequestHandler = (req, res, next) => {
+  if (req.tenantId == null || req.user?.tenantId == null) {
+    res.status(403).json({ error: "Tenant context required" });
+    return;
+  }
+  next();
+};
+
+export const requirePlatformUser: RequestHandler = (req, res, next) => {
+  if (req.tenantId != null || req.user?.tenantId != null) {
+    res.status(403).json({ error: "Platform context required" });
+    return;
+  }
+  next();
+};

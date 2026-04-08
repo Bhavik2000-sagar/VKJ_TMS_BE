@@ -1,0 +1,20 @@
+import "dotenv/config";
+export declare const env: {
+    NODE_ENV: "development" | "production" | "test";
+    PORT: number;
+    DATABASE_URL: string;
+    FRONTEND_ORIGIN: string;
+    FRONTEND_URL: string;
+    JWT_ACCESS_SECRET: string;
+    JWT_REFRESH_SECRET: string;
+    ACCESS_TOKEN_EXPIRES: string;
+    REFRESH_TOKEN_EXPIRES: string;
+    COOKIE_DOMAIN?: string | undefined;
+    SMTP_HOST?: string | undefined;
+    SMTP_PORT?: number | undefined;
+    SMTP_SECURE?: boolean | undefined;
+    SMTP_USER?: string | undefined;
+    SMTP_PASS?: string | undefined;
+    EMAIL_FROM?: string | undefined;
+    EMAIL_FROM_NAME?: string | undefined;
+};

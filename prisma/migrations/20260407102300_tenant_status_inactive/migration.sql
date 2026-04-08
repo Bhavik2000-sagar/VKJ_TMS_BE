@@ -1,0 +1,9 @@
+-- Migrate enum value from DISABLED -> INACTIVE
+ALTER TABLE `tenant`
+  MODIFY `status` ENUM('INVITED', 'ACTIVE', 'DISABLED', 'INACTIVE') NOT NULL DEFAULT 'ACTIVE';
+
+UPDATE `tenant` SET `status` = 'INACTIVE' WHERE `status` = 'DISABLED';
+
+ALTER TABLE `tenant`
+  MODIFY `status` ENUM('INVITED', 'ACTIVE', 'INACTIVE') NOT NULL DEFAULT 'ACTIVE';
+
