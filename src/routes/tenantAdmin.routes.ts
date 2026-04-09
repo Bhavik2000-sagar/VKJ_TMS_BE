@@ -7,6 +7,7 @@ import { requirePermission } from "../middleware/permission.middleware.js";
 import { prisma } from "../lib/prisma.js";
 import {
   ensureTenantHierarchyRoles,
+  creatableTenantRoleCodesForCreator,
   TENANT_ASSIGNABLE_ROLE_CODES,
 } from "../services/tenantBootstrap.service.js";
 
@@ -75,7 +76,13 @@ router.get("/users", requirePermission("user.manage"), async (req, res) => {
   });
 });
 
-router.post("/users", requirePermission("user.manage"), async (req, res) => {
+router.post("/users", async (req, res) => {
+  const allowed = creatableTenantRoleCodesForCreator(req.user?.role?.code);
+  if (allowed.length === 0) {
+    res.status(403).json({ error: "Not allowed to create users" });
+    return;
+  }
+
   const body = z
     .object({
       email: z.string().email(),
@@ -94,7 +101,11 @@ router.post("/users", requirePermission("user.manage"), async (req, res) => {
   const roleRow = await prisma.role.findFirst({
     where: { id: body.roleId, tenantId: req.tenantId! },
   });
-  if (!roleRow || !TENANT_ASSIGNABLE_ROLE_CODES.includes(roleRow.code)) {
+  if (
+    !roleRow ||
+    !TENANT_ASSIGNABLE_ROLE_CODES.includes(roleRow.code) ||
+    !allowed.includes(roleRow.code)
+  ) {
     res.status(400).json({ error: "Invalid role for user creation" });
     return;
   }
@@ -272,7 +283,7 @@ router.get(
   },
 );
 
-router.get("/roles", requirePermission("user.manage"), async (req, res) => {
+router.get("/roles", async (req, res) => {
   const q = z
     .object({
       for: z.enum(["all", "assignment"]).optional(),
@@ -281,15 +292,34 @@ router.get("/roles", requirePermission("user.manage"), async (req, res) => {
 
   if (q.for === "assignment") {
     await ensureTenantHierarchyRoles(req.tenantId!);
+    const allowed = creatableTenantRoleCodesForCreator(req.user?.role?.code);
+    if (allowed.length === 0) {
+      res.status(403).json({ error: "Not allowed to assign roles" });
+      return;
+    }
+
+    const roles = await prisma.role.findMany({
+      where: { tenantId: req.tenantId!, code: { in: allowed } },
+      include: {
+        rolePermissions: { include: { permission: true } },
+      },
+    });
+
+    const order = [...TENANT_ASSIGNABLE_ROLE_CODES].filter((c) =>
+      allowed.includes(c),
+    );
+    roles.sort((a, b) => order.indexOf(a.code) - order.indexOf(b.code));
+    res.json({ roles });
+    return;
   }
 
-  const where =
-    q.for === "assignment"
-      ? {
-          tenantId: req.tenantId!,
-          code: { in: [...TENANT_ASSIGNABLE_ROLE_CODES] },
-        }
-      : { tenantId: req.tenantId! };
+  // For non-assignment role administration, keep strict permission guard.
+  if (!req.effectivePermissions?.has("user.manage")) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
+  const where = { tenantId: req.tenantId! };
 
   const roles = await prisma.role.findMany({
     where,
@@ -297,11 +327,6 @@ router.get("/roles", requirePermission("user.manage"), async (req, res) => {
       rolePermissions: { include: { permission: true } },
     },
   });
-
-  if (q.for === "assignment") {
-    const order = [...TENANT_ASSIGNABLE_ROLE_CODES];
-    roles.sort((a, b) => order.indexOf(a.code) - order.indexOf(b.code));
-  }
 
   res.json({ roles });
 });

@@ -105,8 +105,17 @@ export async function revokeRefreshByHash(jti: string | undefined) {
 const RESET_MS = 60 * 60 * 1000;
 
 export async function requestPasswordReset(email: string) {
-  const user = await prisma.user.findUnique({ where: { email } });
-  if (!user) return;
+  const normalized = String(email).trim().toLowerCase();
+  const user = await prisma.user.findUnique({ where: { email: normalized } });
+  if (!user) {
+    console.info("[auth] forgot-password: email_not_found", {
+      email: normalized,
+    });
+    const err = new Error("Account does not exist with this email address.");
+    (err as Error & { status: number }).status = 404;
+    throw err;
+  }
+
   await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
   const raw = randomToken(48);
   const tokenHash = hashToken(raw);
@@ -114,8 +123,26 @@ export async function requestPasswordReset(email: string) {
   await prisma.passwordResetToken.create({
     data: { userId: user.id, tokenHash, expiresAt },
   });
+
   const resetLink = `${env.FRONTEND_URL.replace(/\/$/, "")}/reset-password?token=${encodeURIComponent(raw)}`;
-  await emailService.sendPasswordResetEmail({ to: user.email, resetLink });
+  try {
+    await emailService.sendPasswordResetEmail({ to: user.email, resetLink });
+    console.info("[auth] forgot-password: email_sent", {
+      userId: user.id,
+      email: user.email,
+    });
+  } catch (e) {
+    console.error("[auth] forgot-password: email_send_failed", {
+      userId: user.id,
+      email: user.email,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    const err = new Error(
+      "We could not send the reset email right now. Please try again later.",
+    );
+    (err as Error & { status: number }).status = 502;
+    throw err;
+  }
 }
 
 export async function completePasswordReset(

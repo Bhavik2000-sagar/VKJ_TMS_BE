@@ -80,8 +80,13 @@ router.post("/refresh", async (req, res) => {
 
 router.post("/forgot-password", async (req, res) => {
   const body = z.object({ email: z.string().email() }).parse(req.body);
-  await authService.requestPasswordReset(body.email);
-  res.json({ ok: true });
+  try {
+    await authService.requestPasswordReset(body.email);
+    res.json({ ok: true });
+  } catch (e) {
+    const err = e as Error & { status?: number };
+    res.status(err.status ?? 400).json({ error: err.message });
+  }
 });
 
 router.post("/reset-password", async (req, res) => {

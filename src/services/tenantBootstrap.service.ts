@@ -6,6 +6,7 @@ const MANAGER_ACTIONS = [
   "task.update",
   "task.review",
   "team.view",
+  "meeting.view",
   "meeting.manage",
   "report.view",
 ] as const;
@@ -28,9 +29,14 @@ const VP_GM_ACTIONS = [
   "settings.hierarchy",
 ] as const;
 
-const STAFF_ACTIONS = ["task.update", "meeting.manage", "report.view"] as const;
+const STAFF_ACTIONS = ["task.create", "task.update", "meeting.view", "report.view"] as const;
 
-const SUPPORTER_ACTIONS = ["task.update", "meeting.manage", "report.view"] as const;
+const SUPPORTER_ACTIONS = [
+  "task.create",
+  "task.update",
+  "meeting.view",
+  "report.view",
+] as const;
 
 /** Stable codes for tenant hierarchy roles (Add user form). */
 export const TENANT_ASSIGNABLE_ROLE_CODES: readonly string[] = [
@@ -40,6 +46,27 @@ export const TENANT_ASSIGNABLE_ROLE_CODES: readonly string[] = [
   "STAFF",
   "SUPPORTER",
 ];
+
+/**
+ * Which hierarchy roles a user can create, based on their own hierarchy role.
+ * Kept separate from permission wiring so we can evolve it without changing permissions.
+ */
+export const TENANT_CREATABLE_ROLE_CODES_BY_CREATOR: Readonly<
+  Record<string, readonly string[]>
+> = {
+  ADMIN: ["ADMIN", "VP_GM", "MANAGER", "STAFF", "SUPPORTER"],
+  VP_GM: ["MANAGER", "STAFF", "SUPPORTER"],
+  MANAGER: ["STAFF", "SUPPORTER"],
+  STAFF: [],
+  SUPPORTER: [],
+};
+
+export function creatableTenantRoleCodesForCreator(
+  creatorRoleCode: string | null | undefined,
+) {
+  if (!creatorRoleCode) return [];
+  return [...(TENANT_CREATABLE_ROLE_CODES_BY_CREATOR[creatorRoleCode] ?? [])];
+}
 
 const ROLE_DEFS: { code: string; name: string; actions: readonly string[] }[] =
   [

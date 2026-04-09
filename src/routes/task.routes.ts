@@ -92,8 +92,8 @@ router.get("/", requirePermission("task.update"), async (req, res) => {
           "status",
           "reviewer",
         ])
-        .default("updatedAt"),
-      sortDir: z.enum(["asc", "desc"]).default("desc"),
+        .optional(),
+      sortDir: z.enum(["asc", "desc"]).optional(),
       queue: z
         .enum(["all", "my", "given", "support", "review"])
         .optional()
@@ -159,8 +159,18 @@ router.post("/", requirePermission("task.create"), async (req, res) => {
     .parse(req.body);
   const parseDate = (s: string | null | undefined) =>
     s && String(s).trim() !== "" ? new Date(s) : null;
+
+  // Users without task.assign (e.g., Staff/Supporter) cannot assign tasks to others.
+  const canAssign = Boolean(req.effectivePermissions?.has("task.assign"));
+  const safeAssignee = canAssign ? body.assignedToId : null;
+  const safeReviewer = canAssign ? body.reviewerId : null;
+  const safeSupporter = canAssign ? body.supporterId : null;
+
   const task = await taskService.createTask(req.userId!, req.tenantId!, {
     ...body,
+    assignedToId: safeAssignee,
+    reviewerId: safeReviewer,
+    supporterId: safeSupporter,
     startDate: parseDate(body.startDate),
     dueDate: parseDate(body.dueDate),
     ...(body.meetingId
@@ -205,20 +215,33 @@ router.patch("/:id", requirePermission("task.update"), async (req, res) => {
       : s && String(s).trim() !== ""
         ? new Date(s)
         : null;
+
+  const canAssign = Boolean(req.effectivePermissions?.has("task.assign"));
+  const safeBody = {
+    ...body,
+    ...(canAssign
+      ? {}
+      : {
+          assignedToId: undefined,
+          reviewerId: undefined,
+          supporterId: undefined,
+        }),
+  };
+
   const task = await taskService.updateTask(
     req.userId!,
     req.tenantId!,
     String(req.params.id),
     {
-      ...body,
+      ...safeBody,
       startDate:
-        body.startDate === undefined
+        safeBody.startDate === undefined
           ? undefined
-          : parseOptDate(body.startDate ?? undefined),
+          : parseOptDate(safeBody.startDate ?? undefined),
       dueDate:
-        body.dueDate === undefined
+        safeBody.dueDate === undefined
           ? undefined
-          : parseOptDate(body.dueDate ?? undefined),
+          : parseOptDate(safeBody.dueDate ?? undefined),
     },
   );
   if (!task) {

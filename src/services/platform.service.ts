@@ -18,16 +18,19 @@ export async function listTenantsPaginated(input: {
   page: number;
   pageSize: number;
   search?: string;
+  status?: "INVITED" | "ACTIVE" | "INACTIVE";
   sortBy: "createdAt" | "name" | "users";
   sortDir: "asc" | "desc";
 }) {
   const skip = (input.page - 1) * input.pageSize;
   const q = input.search?.trim();
-  const where = q
-    ? {
-        OR: [{ name: { contains: q } }],
-      }
-    : {};
+  const where: any = {};
+  if (q) {
+    where.OR = [{ name: { contains: q } }];
+  }
+  if (input.status) {
+    where.status = input.status;
+  }
 
   const orderBy =
     input.sortBy === "users"
@@ -46,6 +49,48 @@ export async function listTenantsPaginated(input: {
   ]);
 
   return { tenants, total, page: input.page, pageSize: input.pageSize };
+}
+
+export async function getTenantDetails(input: { tenantId: string }) {
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: input.tenantId },
+    include: { _count: { select: { users: true } } },
+  });
+  if (!tenant) throw new Error("Tenant not found");
+
+  const latestInvitation = await prisma.tenantInvitation.findFirst({
+    where: { tenantId: tenant.id },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const adminUser = await prisma.user.findFirst({
+    where: { tenantId: tenant.id, role: { code: "ADMIN" } },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, email: true, name: true, createdAt: true },
+  });
+
+  return {
+    tenant,
+    adminUser,
+    latestInvitation: latestInvitation
+      ? {
+          id: latestInvitation.id,
+          email: latestInvitation.email,
+          createdAt: latestInvitation.createdAt,
+          consumedAt: latestInvitation.consumedAt,
+          expiresAt: latestInvitation.expiresAt,
+        }
+      : null,
+  };
+}
+
+export async function updateTenant(input: { tenantId: string; name: string }) {
+  const name = String(input.name ?? "").trim();
+  if (!name) throw new Error("Name is required");
+  return prisma.tenant.update({
+    where: { id: input.tenantId },
+    data: { name },
+  });
 }
 
 export async function createTenantWithInvitation(input: {

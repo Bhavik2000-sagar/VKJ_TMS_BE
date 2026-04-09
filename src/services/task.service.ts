@@ -141,8 +141,8 @@ export async function listTasksPaginated(
     dueTo?: Date;
     search?: string;
     meetingId?: string;
-    sortBy: TaskListSortField;
-    sortDir: "asc" | "desc";
+    sortBy?: TaskListSortField;
+    sortDir?: "asc" | "desc";
   },
 ) {
   const or = await taskVisibilityOrClause(userId, tenantId);
@@ -168,7 +168,10 @@ export async function listTasksPaginated(
     AND: [{ OR: or }, ...andFilters],
   };
 
-  const orderBy = taskListOrderBy(params.sortBy, params.sortDir);
+  const orderBy: Prisma.TaskOrderByWithRelationInput =
+    params.sortBy && params.sortDir
+      ? taskListOrderBy(params.sortBy, params.sortDir)
+      : { id: "asc" };
   const skip = (params.page - 1) * params.pageSize;
 
   const include = {
@@ -753,12 +756,24 @@ export async function deleteTask(
   tenantId: string,
   taskId: string,
 ): Promise<boolean> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { role: true },
+  });
+  if (!user || user.tenantId !== tenantId) return false;
+
   const existing = await prisma.task.findFirst({
     where: { id: taskId, tenantId },
   });
   if (!existing) return false;
   const ok = await canViewTask(userId, tenantId, existing);
   if (!ok) return false;
+
+  // Staff/Supporter can delete tasks only if they created them.
+  const roleCode = user.role?.code ?? null;
+  if ((roleCode === "STAFF" || roleCode === "SUPPORTER") && existing.createdById !== userId) {
+    return false;
+  }
 
   await prisma.$transaction(async (tx) => {
     await tx.meetingOutcome.updateMany({

@@ -27,8 +27,18 @@ router.get("/members", requirePermission("team.view"), async (req, res) => {
     })
     .parse(req.query);
 
+  const requesterRoleCode = req.user?.role?.code ?? null;
+  const roleScope =
+    requesterRoleCode === "ADMIN"
+      ? null
+      : requesterRoleCode === "VP_GM"
+        ? (["MANAGER", "STAFF", "SUPPORTER"] as const)
+        : requesterRoleCode === "MANAGER"
+          ? (["STAFF", "SUPPORTER"] as const)
+          : null;
+
   const term = query.search?.trim();
-  const where = {
+  const baseWhere = {
     tenantId: req.tenantId!,
     ...(query.departmentId ? { departmentId: query.departmentId } : {}),
     ...(query.roleId ? { roleId: query.roleId } : {}),
@@ -44,7 +54,22 @@ router.get("/members", requirePermission("team.view"), async (req, res) => {
           ],
         }
       : {}),
-  } as const;
+  };
+
+  // Role-based visibility (admin sees all).
+  // VP_GM: MANAGER/STAFF/SUPPORTER
+  // MANAGER: STAFF/SUPPORTER
+  // Always include self so the logged-in user doesn't disappear from the list.
+  const where =
+    roleScope == null
+      ? baseWhere
+      : {
+          ...baseWhere,
+          OR: [
+            { id: req.user!.id },
+            { role: { code: { in: [...roleScope] } } },
+          ],
+        };
 
   const [total, users] = await Promise.all([
     prisma.user.count({ where }),

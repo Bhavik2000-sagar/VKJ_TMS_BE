@@ -2,16 +2,75 @@ import { Router } from "express";
 import { z } from "zod";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireTenantUser } from "../middleware/auth.middleware.js";
-import { requirePermission } from "../middleware/permission.middleware.js";
 import * as meetingService from "../services/meeting.service.js";
 import { prisma } from "../lib/prisma.js";
 
 const router = Router();
 router.use(authMiddleware, requireTenantUser);
 
+function requireMeetingView(req: any, res: any, next: any) {
+  const perms: Set<string> | undefined = req.effectivePermissions;
+  if (perms?.has("meeting.view") || perms?.has("meeting.manage")) return next();
+  res.status(403).json({ error: "Forbidden" });
+}
+
+function requireMeetingManage(req: any, res: any, next: any) {
+  const perms: Set<string> | undefined = req.effectivePermissions;
+  if (perms?.has("meeting.manage")) return next();
+  res.status(403).json({ error: "Forbidden" });
+}
+
+async function requireMeetingManageOrCreator(
+  req: any,
+  res: any,
+  next: any,
+) {
+  const perms: Set<string> | undefined = req.effectivePermissions;
+  if (perms?.has("meeting.manage")) return next();
+  const meetingId = String(req.params.id ?? "");
+  if (!meetingId) {
+    res.status(400).json({ error: "Meeting id required" });
+    return;
+  }
+  const m = await prisma.meeting.findFirst({
+    where: { id: meetingId, tenantId: req.tenantId! },
+    select: { id: true, createdById: true },
+  });
+  if (!m) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (m.createdById !== req.userId) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  next();
+}
+
+async function requireMeetingManageOrCreatorIfScheduled(
+  req: any,
+  res: any,
+  next: any,
+) {
+  const perms: Set<string> | undefined = req.effectivePermissions;
+  if (perms?.has("meeting.manage")) return next();
+  const meetingId = String(req.params.id ?? "");
+  const m = await meetingService.getMeeting(req.userId!, req.tenantId!, meetingId);
+  if (!m) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  // Non-managers can only edit meetings they created, and only while scheduled.
+  if (m.createdBy.id !== req.userId || m.computedStatus !== "SCHEDULED") {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  next();
+}
+
 router.get(
   "/eligible-attendees",
-  requirePermission("meeting.manage"),
+  requireMeetingView,
   async (req, res) => {
     const users = await prisma.user.findMany({
       where: { tenantId: req.tenantId! },
@@ -22,7 +81,7 @@ router.get(
   },
 );
 
-router.get("/", requirePermission("meeting.manage"), async (req, res) => {
+router.get("/", requireMeetingView, async (req, res) => {
   const query = z
     .object({
       page: z.coerce.number().int().min(1).optional(),
@@ -78,7 +137,7 @@ router.get("/", requirePermission("meeting.manage"), async (req, res) => {
   });
 });
 
-router.get("/:id", requirePermission("meeting.manage"), async (req, res) => {
+router.get("/:id", requireMeetingView, async (req, res) => {
   const m = await meetingService.getMeeting(
     req.userId!,
     req.tenantId!,
@@ -91,7 +150,7 @@ router.get("/:id", requirePermission("meeting.manage"), async (req, res) => {
   res.json({ meeting: m });
 });
 
-router.post("/", requirePermission("meeting.manage"), async (req, res) => {
+router.post("/", requireMeetingView, async (req, res) => {
   const body = z
     .object({
       title: z.string().min(1),
@@ -124,7 +183,7 @@ router.post("/", requirePermission("meeting.manage"), async (req, res) => {
   res.status(201).json({ meeting });
 });
 
-router.patch("/:id", requirePermission("meeting.manage"), async (req, res) => {
+router.patch("/:id", requireMeetingManageOrCreatorIfScheduled, async (req, res) => {
   const params = z.object({ id: z.string().min(1) }).parse(req.params);
   const body = z
     .object({
@@ -164,7 +223,7 @@ router.patch("/:id", requirePermission("meeting.manage"), async (req, res) => {
 
 router.post(
   "/:id/cancel",
-  requirePermission("meeting.manage"),
+  requireMeetingManageOrCreator,
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const meeting = await meetingService.cancelMeeting(
@@ -182,7 +241,7 @@ router.post(
 
 router.post(
   "/:id/complete",
-  requirePermission("meeting.manage"),
+  requireMeetingManageOrCreator,
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const meeting = await meetingService.completeMeeting(
@@ -200,7 +259,7 @@ router.post(
 
 router.post(
   "/:id/outcomes",
-  requirePermission("meeting.manage"),
+  requireMeetingManageOrCreator,
   async (req, res) => {
     const body = z
       .object({
@@ -227,7 +286,7 @@ router.post(
   },
 );
 
-router.delete("/:id", requirePermission("meeting.manage"), async (req, res) => {
+router.delete("/:id", requireMeetingManageOrCreator, async (req, res) => {
   const params = z.object({ id: z.string().min(1) }).parse(req.params);
   const ok = await meetingService.deleteMeeting(
     req.userId!,

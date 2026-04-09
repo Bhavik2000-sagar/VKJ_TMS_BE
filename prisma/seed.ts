@@ -13,6 +13,7 @@ const PERMISSIONS: { action: string; module: string }[] = [
   { action: "task.update", module: "task" },
   { action: "task.review", module: "task" },
   { action: "team.view", module: "team" },
+  { action: "meeting.view", module: "meeting" },
   { action: "meeting.manage", module: "meeting" },
   { action: "report.view", module: "report" },
   { action: "user.manage", module: "settings" },
