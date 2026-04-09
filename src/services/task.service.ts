@@ -135,6 +135,7 @@ export async function listTasksPaginated(
     page: number;
     pageSize: number;
     queue?: TaskListQueue;
+    reviewerId?: string;
     statusId?: string;
     priority?: string;
     dueFrom?: Date;
@@ -150,6 +151,8 @@ export async function listTasksPaginated(
 
   const qf = queueFilter(userId, params.queue);
   if (qf) andFilters.push(qf);
+
+  if (params.reviewerId) andFilters.push({ reviewerId: params.reviewerId });
 
   if (params.statusId) andFilters.push({ statusId: params.statusId });
   if (params.priority) andFilters.push({ priority: params.priority });
@@ -545,11 +548,19 @@ export async function addComment(
 ) {
   const existing = await prisma.task.findFirst({
     where: { id: taskId, tenantId },
+    select: {
+      id: true,
+      title: true,
+      assignedToId: true,
+      reviewerId: true,
+      supporterId: true,
+      createdById: true,
+    },
   });
   if (!existing) return null;
   const ok = await canViewTask(userId, tenantId, existing);
   if (!ok) return null;
-  return prisma.taskActivity.create({
+  const activity = await prisma.taskActivity.create({
     data: {
       taskId,
       userId,
@@ -557,6 +568,27 @@ export async function addComment(
       message,
     },
   });
+
+  const notifyIds = new Set<string>();
+  if (existing.assignedToId) notifyIds.add(existing.assignedToId);
+  if (existing.reviewerId) notifyIds.add(existing.reviewerId);
+  if (existing.supporterId) notifyIds.add(existing.supporterId);
+  if (existing.createdById) notifyIds.add(existing.createdById);
+  notifyIds.delete(userId);
+
+  await Promise.all(
+    Array.from(notifyIds).map((toUserId) =>
+      notificationService.createNotification({
+        userId: toUserId,
+        type: "TASK_UPDATED",
+        message: `New comment on: ${existing.title}`,
+        taskId: existing.id,
+        metadata: { kind: "TASK_COMMENT", taskId: existing.id } as any,
+      }),
+    ),
+  );
+
+  return activity;
 }
 
 export async function addAttachment(
@@ -771,7 +803,10 @@ export async function deleteTask(
 
   // Staff/Supporter can delete tasks only if they created them.
   const roleCode = user.role?.code ?? null;
-  if ((roleCode === "STAFF" || roleCode === "SUPPORTER") && existing.createdById !== userId) {
+  if (
+    (roleCode === "STAFF" || roleCode === "SUPPORTER") &&
+    existing.createdById !== userId
+  ) {
     return false;
   }
 

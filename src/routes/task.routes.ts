@@ -98,6 +98,12 @@ router.get("/", requirePermission("task.update"), async (req, res) => {
         .enum(["all", "my", "given", "support", "review"])
         .optional()
         .transform((s) => (s && s !== "all" ? s : undefined)),
+      reviewerId: z
+        .string()
+        .optional()
+        .transform((s) =>
+          s && String(s).trim() ? String(s).trim() : undefined,
+        ),
       meetingId: z
         .string()
         .optional()
@@ -114,6 +120,7 @@ router.get("/", requirePermission("task.update"), async (req, res) => {
       page: q.page,
       pageSize: q.pageSize,
       queue: q.queue,
+      reviewerId: q.reviewerId,
       statusId: q.statusId,
       priority: q.priority,
       dueFrom: q.dueFrom,
