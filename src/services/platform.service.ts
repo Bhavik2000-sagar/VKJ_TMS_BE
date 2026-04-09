@@ -285,6 +285,85 @@ export async function deleteTenant(input: { tenantId: string }) {
   });
   if (!tenant) throw new Error("Tenant not found");
 
-  await prisma.tenant.delete({ where: { id: tenant.id } });
+  await prisma.$transaction(async (tx) => {
+    const userIds = (
+      await tx.user.findMany({
+        where: { tenantId: tenant.id },
+        select: { id: true },
+      })
+    ).map((u) => u.id);
+
+    const roleIds = (
+      await tx.role.findMany({
+        where: { tenantId: tenant.id },
+        select: { id: true },
+      })
+    ).map((r) => r.id);
+
+    const meetingIds = (
+      await tx.meeting.findMany({
+        where: { tenantId: tenant.id },
+        select: { id: true },
+      })
+    ).map((m) => m.id);
+
+    // User-scoped records (must go before users).
+    if (userIds.length) {
+      await tx.notification.deleteMany({ where: { userId: { in: userIds } } });
+      await tx.refreshToken.deleteMany({ where: { userId: { in: userIds } } });
+      await tx.passwordResetToken.deleteMany({
+        where: { userId: { in: userIds } },
+      });
+      await tx.userPermission.deleteMany({
+        where: { userId: { in: userIds } },
+      });
+    }
+
+    // Meetings (outcomes/attendees depend on meetingId).
+    if (meetingIds.length) {
+      await tx.meetingAttendee.deleteMany({
+        where: { meetingId: { in: meetingIds } },
+      });
+      await tx.meetingOutcome.deleteMany({
+        where: { meetingId: { in: meetingIds } },
+      });
+    }
+
+    // Tasks and their dependents.
+    await tx.attachment.deleteMany({
+      where: { task: { tenantId: tenant.id } },
+    });
+    await tx.taskChecklistItem.deleteMany({
+      where: { task: { tenantId: tenant.id } },
+    });
+    await tx.taskActivity.deleteMany({
+      where: { task: { tenantId: tenant.id } },
+    });
+    await tx.task.deleteMany({ where: { tenantId: tenant.id } });
+
+    // Now meetings can be deleted safely.
+    await tx.meeting.deleteMany({ where: { tenantId: tenant.id } });
+
+    // Tenant-level config tables.
+    await tx.slaRule.deleteMany({ where: { tenantId: tenant.id } });
+    await tx.taskStatus.deleteMany({ where: { tenantId: tenant.id } });
+    await tx.department.deleteMany({ where: { tenantId: tenant.id } });
+    await tx.branch.deleteMany({ where: { tenantId: tenant.id } });
+    await tx.template.deleteMany({ where: { tenantId: tenant.id } });
+    await tx.tenantInvitation.deleteMany({ where: { tenantId: tenant.id } });
+
+    // Roles/users (roleId FK requires users first).
+    await tx.user.deleteMany({ where: { tenantId: tenant.id } });
+    if (roleIds.length) {
+      // Extra safety: remove role-permission join rows explicitly (also cascades).
+      await tx.rolePermission.deleteMany({
+        where: { roleId: { in: roleIds } },
+      });
+    }
+    await tx.role.deleteMany({ where: { tenantId: tenant.id } });
+
+    // Finally delete tenant.
+    await tx.tenant.delete({ where: { id: tenant.id } });
+  });
   return { ok: true as const };
 }
