@@ -4,8 +4,8 @@ import * as authService from "../services/auth.service.js";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { verifyRefreshToken } from "../utils/jwt.js";
 import { revokeRefreshByHash } from "../services/auth.service.js";
-import * as platformService from "../services/platform.service.js";
 import { prisma } from "../lib/prisma.js";
+import { usernameSchema } from "../utils/username.js";
 
 const router = Router();
 
@@ -15,13 +15,13 @@ const MS_REFRESH = 24 * 60 * 60 * 1000;
 router.post("/login", async (req, res) => {
   const body = z
     .object({
-      email: z.string().email(),
+      username: usernameSchema,
       password: z.string().min(1),
     })
     .parse(req.body);
   try {
     const { user, accessToken, refreshToken } = await authService.loginUser(
-      body.email,
+      body.username,
       body.password,
     );
     const opts = authService.buildAuthCookieOptions();
@@ -36,7 +36,7 @@ router.post("/login", async (req, res) => {
     res.json({
       user: {
         id: user.id,
-        email: user.email,
+        username: user.username,
         name: user.name,
         tenantId: user.tenantId,
         roleCode: user.role?.code,
@@ -68,24 +68,13 @@ router.post("/refresh", async (req, res) => {
     res.json({
       user: {
         id: user.id,
-        email: user.email,
+        username: user.username,
         name: user.name,
         tenantId: user.tenantId,
       },
     });
   } catch {
     res.status(401).json({ error: "Invalid refresh" });
-  }
-});
-
-router.post("/forgot-password", async (req, res) => {
-  const body = z.object({ email: z.string().email() }).parse(req.body);
-  try {
-    await authService.requestPasswordReset(body.email);
-    res.json({ ok: true });
-  } catch (e) {
-    const err = e as Error & { status?: number };
-    res.status(err.status ?? 400).json({ error: err.message });
   }
 });
 
@@ -125,7 +114,7 @@ router.get("/me", authMiddleware, async (req, res) => {
   res.json({
     user: {
       id: req.user!.id,
-      email: req.user!.email,
+      username: req.user!.username,
       name: req.user!.name,
       phone: req.user!.phone,
       birthDate: req.user!.birthDate,
@@ -164,7 +153,7 @@ router.patch("/me", authMiddleware, async (req, res) => {
     },
     select: {
       id: true,
-      email: true,
+      username: true,
       name: true,
       phone: true,
       birthDate: true,
@@ -178,7 +167,7 @@ router.patch("/me", authMiddleware, async (req, res) => {
   res.json({
     user: {
       id: user.id,
-      email: user.email,
+      username: user.username,
       name: user.name,
       phone: user.phone,
       birthDate: user.birthDate,
@@ -204,40 +193,6 @@ router.post("/change-password", authMiddleware, async (req, res) => {
       body.newPassword,
     );
     res.json({ ok: true });
-  } catch (e) {
-    res.status(400).json({ error: (e as Error).message });
-  }
-});
-
-router.post("/accept-invite", async (req, res) => {
-  const body = z
-    .object({
-      token: z.string().min(10),
-      password: z.string().min(8),
-      name: z.string().min(1),
-    })
-    .parse(req.body);
-  try {
-    const user = await platformService.acceptTenantInvitation(body);
-    const session = await authService.loginUser(user.email, body.password);
-    const opts = authService.buildAuthCookieOptions();
-    res.cookie(authService.getAccessCookieName(), session.accessToken, {
-      ...opts,
-      maxAge: MS_ACCESS,
-    });
-    res.cookie(authService.getRefreshCookieName(), session.refreshToken, {
-      ...opts,
-      maxAge: MS_REFRESH,
-    });
-    res.json({
-      user: {
-        id: session.user.id,
-        email: session.user.email,
-        name: session.user.name,
-        tenantId: session.user.tenantId,
-        roleCode: session.user.role?.code,
-      },
-    });
   } catch (e) {
     res.status(400).json({ error: (e as Error).message });
   }

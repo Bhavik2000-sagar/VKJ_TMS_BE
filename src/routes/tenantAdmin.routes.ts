@@ -1,27 +1,87 @@
 import { Router } from "express";
+import type { Response } from "express";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireTenantUser } from "../middleware/auth.middleware.js";
-import { requirePermission } from "../middleware/permission.middleware.js";
+import {
+  requireAnyPermission,
+  requirePermission,
+} from "../middleware/permission.middleware.js";
 import { prisma } from "../lib/prisma.js";
 import {
-  ensureTenantHierarchyRoles,
-  creatableTenantRoleCodesForCreator,
-  TENANT_ASSIGNABLE_ROLE_CODES,
+  assertActorMayAssignRole,
+  ensureTenantPrimaryAdminRole,
+  getTenantPrimaryAdminRole,
 } from "../services/tenantBootstrap.service.js";
+import {
+  matrixSelectionsToKeys,
+  keysToMatrixSelections,
+  keysToRolePermissionRows,
+  KNOWN_PERMISSION_KEYS,
+  PERMISSION_MATRIX_ACTIONS,
+  PERMISSION_MATRIX_MODULES,
+  permissionKey,
+  P,
+} from "../constants/permissions.js";
+import { usernameSchema } from "../utils/username.js";
 
 const router = Router();
 router.use(authMiddleware, requireTenantUser);
 
-router.get("/users", requirePermission("user.manage"), async (req, res) => {
+function assertCallerGrants(
+  caller: Set<string> | undefined,
+  requested: string[],
+  res: Response,
+): boolean {
+  if (!caller) {
+    res.status(403).json({ error: "Forbidden" });
+    return false;
+  }
+  for (const k of requested) {
+    if (!caller.has(k)) {
+      res.status(403).json({
+        error: "Cannot grant permissions you do not have",
+        key: k,
+      });
+      return false;
+    }
+  }
+  return true;
+}
+
+function assertKeysKnown(keys: string[], res: Response): boolean {
+  for (const k of keys) {
+    if (!KNOWN_PERMISSION_KEYS.has(k)) {
+      res.status(400).json({ error: "Unknown permission key", key: k });
+      return false;
+    }
+  }
+  return true;
+}
+
+function resolveRequestedKeys(body: {
+  permissions?: { module: string; action: string }[];
+  permissionKeys?: string[];
+}): string[] {
+  const keys: string[] = [];
+  if (body.permissions?.length) {
+    keys.push(...matrixSelectionsToKeys(body.permissions));
+  }
+  if (body.permissionKeys?.length) {
+    keys.push(...body.permissionKeys);
+  }
+  return [...new Set(keys)];
+}
+
+router.get("/users", requirePermission(P.USERS_READ), async (req, res) => {
   const query = z
     .object({
       page: z.coerce.number().int().min(1).default(1),
       pageSize: z.coerce.number().int().min(1).max(100).default(10),
       search: z.string().trim().optional(),
       sortBy: z
-        .enum(["name", "email", "employeeCode", "createdAt"])
+        .enum(["name", "username", "employeeCode", "createdAt"])
         .default("createdAt"),
       sortDir: z.enum(["asc", "desc"]).default("desc"),
     })
@@ -30,11 +90,14 @@ router.get("/users", requirePermission("user.manage"), async (req, res) => {
   const term = query.search?.trim();
   const where = {
     tenantId: req.tenantId!,
+    ...(req.departmentScopeIds?.length
+      ? { departmentId: { in: req.departmentScopeIds } }
+      : {}),
     ...(term
       ? {
           OR: [
             { name: { contains: term } },
-            { email: { contains: term } },
+            { username: { contains: term } },
             { employeeCode: { contains: term } },
           ],
         }
@@ -50,7 +113,7 @@ router.get("/users", requirePermission("user.manage"), async (req, res) => {
       take: query.pageSize,
       select: {
         id: true,
-        email: true,
+        username: true,
         name: true,
         isActive: true,
         managerId: true,
@@ -76,16 +139,10 @@ router.get("/users", requirePermission("user.manage"), async (req, res) => {
   });
 });
 
-router.post("/users", async (req, res) => {
-  const allowed = creatableTenantRoleCodesForCreator(req.user?.role?.code);
-  if (allowed.length === 0) {
-    res.status(403).json({ error: "Not allowed to create users" });
-    return;
-  }
-
+router.post("/users", requirePermission(P.USERS_CREATE), async (req, res) => {
   const body = z
     .object({
-      email: z.string().email(),
+      username: usernameSchema,
       name: z.string().min(1),
       password: z.string().min(8),
       roleId: z.string(),
@@ -101,26 +158,48 @@ router.post("/users", async (req, res) => {
   const roleRow = await prisma.role.findFirst({
     where: { id: body.roleId, tenantId: req.tenantId! },
   });
-  if (
-    !roleRow ||
-    !TENANT_ASSIGNABLE_ROLE_CODES.includes(roleRow.code) ||
-    !allowed.includes(roleRow.code)
-  ) {
+  if (!roleRow) {
     res.status(400).json({ error: "Invalid role for user creation" });
     return;
+  }
+
+  const assignCheck = await assertActorMayAssignRole({
+    tenantId: req.tenantId!,
+    actorRoleId: req.user!.roleId,
+    targetRoleId: roleRow.id,
+  });
+  if (!assignCheck.ok) {
+    res.status(assignCheck.status).json({ error: assignCheck.error });
+    return;
+  }
+
+  const creatorDeptId = req.user?.role?.departmentId ?? null;
+  if (creatorDeptId) {
+    if (roleRow.departmentId !== creatorDeptId) {
+      res
+        .status(400)
+        .json({ error: "Role not available in your department scope" });
+      return;
+    }
+    if (body.departmentId && body.departmentId !== creatorDeptId) {
+      res
+        .status(400)
+        .json({ error: "User department must stay within your scope" });
+      return;
+    }
   }
 
   const passwordHash = await bcrypt.hash(body.password, 12);
   const user = await prisma.user.create({
     data: {
       tenantId: req.tenantId!,
-      email: body.email,
+      username: body.username,
       name: body.name,
       passwordHash,
       roleId: body.roleId,
       managerId: body.managerId,
       branchId: body.branchId ?? null,
-      departmentId: body.departmentId ?? null,
+      departmentId: body.departmentId ?? (creatorDeptId ? creatorDeptId : null),
       employeeCode: body.employeeCode ?? null,
       phone: body.phone ?? null,
       birthDate: body.birthDate ?? null,
@@ -130,13 +209,13 @@ router.post("/users", async (req, res) => {
   res.status(201).json({ user });
 });
 
-router.get("/users/:id", requirePermission("user.manage"), async (req, res) => {
+router.get("/users/:id", requirePermission(P.USERS_READ), async (req, res) => {
   const params = z.object({ id: z.string().min(1) }).parse(req.params);
   const user = await prisma.user.findFirst({
     where: { id: params.id, tenantId: req.tenantId! },
     select: {
       id: true,
-      email: true,
+      username: true,
       name: true,
       isActive: true,
       managerId: true,
@@ -153,12 +232,20 @@ router.get("/users/:id", requirePermission("user.manage"), async (req, res) => {
     res.status(404).json({ error: "User not found" });
     return;
   }
+  if (
+    req.departmentScopeIds?.length &&
+    user.departmentId &&
+    !req.departmentScopeIds.includes(user.departmentId)
+  ) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
   res.json({ user });
 });
 
 router.patch(
   "/users/:id",
-  requirePermission("user.manage"),
+  requirePermission(P.USERS_UPDATE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const body = z
@@ -173,23 +260,61 @@ router.patch(
       })
       .parse(req.body);
 
-    if (body.roleId) {
-      const roleRow = await prisma.role.findFirst({
-        where: { id: body.roleId, tenantId: req.tenantId! },
-      });
-      if (!roleRow || !TENANT_ASSIGNABLE_ROLE_CODES.includes(roleRow.code)) {
-        res.status(400).json({ error: "Invalid role for user update" });
-        return;
-      }
-    }
-
     const existing = await prisma.user.findFirst({
       where: { id: params.id, tenantId: req.tenantId! },
-      select: { id: true },
+      select: { id: true, departmentId: true },
     });
     if (!existing) {
       res.status(404).json({ error: "User not found" });
       return;
+    }
+    if (
+      req.departmentScopeIds?.length &&
+      existing.departmentId &&
+      !req.departmentScopeIds.includes(existing.departmentId)
+    ) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    if (body.roleId) {
+      const roleRow = await prisma.role.findFirst({
+        where: { id: body.roleId, tenantId: req.tenantId! },
+      });
+      if (!roleRow) {
+        res.status(400).json({ error: "Invalid role for user update" });
+        return;
+      }
+      const assignCheck = await assertActorMayAssignRole({
+        tenantId: req.tenantId!,
+        actorRoleId: req.user!.roleId,
+        targetRoleId: roleRow.id,
+      });
+      if (!assignCheck.ok) {
+        res.status(assignCheck.status).json({ error: assignCheck.error });
+        return;
+      }
+      const creatorDeptId = req.user?.role?.departmentId ?? null;
+      if (creatorDeptId && roleRow.departmentId !== creatorDeptId) {
+        res
+          .status(400)
+          .json({ error: "Role not available in your department scope" });
+        return;
+      }
+    }
+
+    if (body.departmentId !== undefined) {
+      const creatorDeptId = req.user?.role?.departmentId ?? null;
+      if (
+        creatorDeptId &&
+        body.departmentId &&
+        body.departmentId !== creatorDeptId
+      ) {
+        res
+          .status(400)
+          .json({ error: "User department must stay within your scope" });
+        return;
+      }
     }
 
     const user = await prisma.user.update({
@@ -209,7 +334,7 @@ router.patch(
       },
       select: {
         id: true,
-        email: true,
+        username: true,
         name: true,
         isActive: true,
         managerId: true,
@@ -229,10 +354,27 @@ router.patch(
 
 router.patch(
   "/users/:id/status",
-  requirePermission("user.manage"),
+  requirePermission(P.USERS_UPDATE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const body = z.object({ isActive: z.boolean() }).parse(req.body);
+
+    const existing = await prisma.user.findFirst({
+      where: { id: params.id, tenantId: req.tenantId! },
+      select: { id: true, departmentId: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+    if (
+      req.departmentScopeIds?.length &&
+      existing.departmentId &&
+      !req.departmentScopeIds.includes(existing.departmentId)
+    ) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
 
     const user = await prisma.user.update({
       where: { id: params.id },
@@ -249,7 +391,7 @@ router.patch(
 
 router.delete(
   "/users/:id",
-  requirePermission("user.manage"),
+  requirePermission(P.USERS_DELETE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
 
@@ -260,9 +402,17 @@ router.delete(
 
     const existing = await prisma.user.findFirst({
       where: { id: params.id, tenantId: req.tenantId! },
-      select: { id: true },
+      select: { id: true, departmentId: true },
     });
     if (!existing) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+    if (
+      req.departmentScopeIds?.length &&
+      existing.departmentId &&
+      !req.departmentScopeIds.includes(existing.departmentId)
+    ) {
       res.status(404).json({ error: "User not found" });
       return;
     }
@@ -273,15 +423,63 @@ router.delete(
 );
 
 router.get(
-  "/permissions-catalog",
-  requirePermission("user.manage"),
-  async (_req, res) => {
-    const permissions = await prisma.permission.findMany({
-      orderBy: { module: "asc" },
+  "/permission-matrix-def",
+  requireAnyPermission([
+    P.USERS_CREATE,
+    P.USERS_UPDATE,
+    P.ROLES_READ,
+    P.ROLES_CREATE,
+    P.ROLES_UPDATE,
+    P.ROLES_DELETE,
+  ]),
+  (_req, res) => {
+    res.json({
+      modules: [...PERMISSION_MATRIX_MODULES],
+      actions: [...PERMISSION_MATRIX_ACTIONS],
     });
-    res.json({ permissions });
   },
 );
+
+router.get(
+  "/permissions-catalog",
+  requireAnyPermission([
+    P.ROLES_READ,
+    P.ROLES_CREATE,
+    P.ROLES_UPDATE,
+    P.ROLES_DELETE,
+  ]),
+  (_req, res) => {
+    res.json({
+      permissions: [...KNOWN_PERMISSION_KEYS].sort().map((key) => {
+        const [module, action] = key.split(".");
+        return { key, module, action };
+      }),
+    });
+  },
+);
+
+const roleInclude = {
+  rolePermissions: true,
+} as const;
+
+function serializeRole(role: {
+  id: string;
+  tenantId: string | null;
+  departmentId: string | null;
+  code: string;
+  name: string;
+  isSystem: boolean;
+  rolePermissions: { module: string; action: string }[];
+}) {
+  const keys = role.rolePermissions.map((rp) =>
+    permissionKey(rp.module, rp.action),
+  );
+  return {
+    ...role,
+    permissionKeys: keys,
+    matrixSelections: keysToMatrixSelections(keys),
+  };
+}
 
 router.get("/roles", async (req, res) => {
   const q = z
@@ -291,78 +489,200 @@ router.get("/roles", async (req, res) => {
     .parse(req.query);
 
   if (q.for === "assignment") {
-    await ensureTenantHierarchyRoles(req.tenantId!);
-    const allowed = creatableTenantRoleCodesForCreator(req.user?.role?.code);
-    if (allowed.length === 0) {
-      res.status(403).json({ error: "Not allowed to assign roles" });
+    if (
+      !req.effectivePermissions?.has(P.USERS_CREATE) &&
+      !req.effectivePermissions?.has(P.USERS_UPDATE)
+    ) {
+      res.status(403).json({ error: "Forbidden" });
       return;
     }
-
+    await ensureTenantPrimaryAdminRole(req.tenantId!);
+    const primary = await getTenantPrimaryAdminRole(req.tenantId!);
+    const creatorDeptId = req.user?.role?.departmentId ?? null;
     const roles = await prisma.role.findMany({
-      where: { tenantId: req.tenantId!, code: { in: allowed } },
-      include: {
-        rolePermissions: { include: { permission: true } },
+      where: {
+        tenantId: req.tenantId!,
+        ...(creatorDeptId ? { departmentId: creatorDeptId } : {}),
       },
+      include: roleInclude,
     });
 
-    const order = [...TENANT_ASSIGNABLE_ROLE_CODES].filter((c) =>
-      allowed.includes(c),
-    );
-    roles.sort((a, b) => order.indexOf(a.code) - order.indexOf(b.code));
-    res.json({ roles });
+    roles.sort((a, b) => {
+      const aPrimary = primary && a.id === primary.id ? 0 : 1;
+      const bPrimary = primary && b.id === primary.id ? 0 : 1;
+      if (aPrimary !== bPrimary) return aPrimary - bPrimary;
+      return a.name.localeCompare(b.name);
+    });
+    res.json({ roles: roles.map(serializeRole) });
     return;
   }
 
-  // For non-assignment role administration, keep strict permission guard.
-  if (!req.effectivePermissions?.has("user.manage")) {
+  if (
+    !req.effectivePermissions?.has(P.ROLES_READ) &&
+    !req.effectivePermissions?.has(P.ROLES_CREATE) &&
+    !req.effectivePermissions?.has(P.ROLES_UPDATE) &&
+    !req.effectivePermissions?.has(P.ROLES_DELETE)
+  ) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
 
-  const where = { tenantId: req.tenantId! };
-
   const roles = await prisma.role.findMany({
-    where,
-    include: {
-      rolePermissions: { include: { permission: true } },
-    },
+    where: { tenantId: req.tenantId! },
+    include: roleInclude,
   });
 
-  res.json({ roles });
+  res.json({ roles: roles.map(serializeRole) });
 });
 
-router.post("/roles", requirePermission("role.manage"), async (req, res) => {
-  const body = z
-    .object({
-      code: z.string().min(1),
-      name: z.string().min(1),
-      permissionIds: z.array(z.string()),
-    })
-    .parse(req.body);
+const roleBodySchema = z.object({
+  code: z.string().min(1),
+  name: z.string().min(1),
+  departmentId: z.string().min(1).optional().nullable(),
+  permissions: z
+    .array(z.object({ module: z.string().min(1), action: z.string().min(1) }))
+    .optional(),
+  permissionKeys: z.array(z.string().min(1)).optional(),
+});
+
+router.post("/roles", requirePermission(P.ROLES_CREATE), async (req, res) => {
+  const body = roleBodySchema.parse(req.body);
+  const keys = resolveRequestedKeys(body);
+  if (keys.length === 0) {
+    res.status(400).json({ error: "At least one permission is required" });
+    return;
+  }
+  if (!assertKeysKnown(keys, res)) return;
+  if (!assertCallerGrants(req.effectivePermissions, keys, res)) return;
+
+  const creatorDeptId = req.user?.role?.departmentId ?? null;
+  let departmentId: string | null = body.departmentId ?? null;
+  if (creatorDeptId) {
+    departmentId = creatorDeptId;
+  }
+  if (departmentId) {
+    const dept = await prisma.department.findFirst({
+      where: { id: departmentId, tenantId: req.tenantId! },
+    });
+    if (!dept) {
+      res.status(400).json({ error: "Invalid department" });
+      return;
+    }
+  }
+
+  const rows = keysToRolePermissionRows(keys);
   const role = await prisma.role.create({
     data: {
       tenantId: req.tenantId!,
       code: body.code,
       name: body.name,
       isSystem: false,
-      rolePermissions: {
-        create: body.permissionIds.map((id) => ({ permissionId: id })),
-      },
+      departmentId,
+      rolePermissions: { create: rows },
     },
-    include: { rolePermissions: { include: { permission: true } } },
+    include: roleInclude,
   });
-  res.status(201).json({ role });
+  res.status(201).json({ role: serializeRole(role) });
 });
 
-router.get(
-  "/permissions",
-  requirePermission("role.manage"),
-  async (_req, res) => {
-    const permissions = await prisma.permission.findMany({
-      orderBy: { module: "asc" },
+router.patch(
+  "/roles/:id",
+  requirePermission(P.ROLES_UPDATE),
+  async (req, res) => {
+    const params = z.object({ id: z.string().min(1) }).parse(req.params);
+    const body = z
+      .object({
+        name: z.string().min(1).optional(),
+        departmentId: z.string().min(1).optional().nullable(),
+        permissions: z
+          .array(
+            z.object({ module: z.string().min(1), action: z.string().min(1) }),
+          )
+          .optional(),
+        permissionKeys: z.array(z.string().min(1)).optional(),
+      })
+      .parse(req.body);
+
+    const existing = await prisma.role.findFirst({
+      where: { id: params.id, tenantId: req.tenantId! },
+      include: roleInclude,
     });
-    res.json({ permissions });
+    if (!existing) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const creatorDeptId = req.user?.role?.departmentId ?? null;
+    if (
+      creatorDeptId &&
+      existing.departmentId &&
+      existing.departmentId !== creatorDeptId
+    ) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    let departmentId = existing.departmentId;
+    if (body.departmentId !== undefined) {
+      if (creatorDeptId && body.departmentId !== creatorDeptId) {
+        res.status(400).json({ error: "Invalid department for your scope" });
+        return;
+      }
+      departmentId = body.departmentId;
+      if (departmentId) {
+        const dept = await prisma.department.findFirst({
+          where: { id: departmentId, tenantId: req.tenantId! },
+        });
+        if (!dept) {
+          res.status(400).json({ error: "Invalid department" });
+          return;
+        }
+      }
+    }
+
+    const keys =
+      body.permissions !== undefined || body.permissionKeys !== undefined
+        ? resolveRequestedKeys({
+            permissions: body.permissions,
+            permissionKeys: body.permissionKeys,
+          })
+        : null;
+
+    if (keys !== null && keys.length > 0) {
+      if (!assertKeysKnown(keys, res)) return;
+      if (!assertCallerGrants(req.effectivePermissions, keys, res)) return;
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (keys !== null) {
+        await tx.rolePermission.deleteMany({ where: { roleId: params.id } });
+        const rows = keysToRolePermissionRows(keys);
+        if (rows.length) {
+          await tx.rolePermission.createMany({
+            data: rows.map((r) => ({ roleId: params.id, ...r })),
+          });
+        }
+      }
+      return tx.role.update({
+        where: { id: params.id },
+        data: {
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.departmentId !== undefined ? { departmentId } : {}),
+        },
+        include: roleInclude,
+      });
+    });
+
+    res.json({ role: serializeRole(updated) });
   },
 );
+
+router.get("/permissions", requirePermission(P.ROLES_READ), (_req, res) => {
+  res.json({
+    permissions: [...KNOWN_PERMISSION_KEYS].sort().map((key) => {
+      const [module, action] = key.split(".");
+      return { key, module, action };
+    }),
+  });
+});
 
 export default router;

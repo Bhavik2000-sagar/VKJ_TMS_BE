@@ -1,168 +1,126 @@
 import { prisma } from "../lib/prisma.js";
-
-const MANAGER_ACTIONS = [
-  "task.create",
-  "task.assign",
-  "task.update",
-  "task.review",
-  "team.view",
-  "meeting.view",
-  "meeting.manage",
-  "report.view",
-] as const;
-
-const ADMIN_ACTIONS = [
-  ...MANAGER_ACTIONS,
-  "user.manage",
-  "role.manage",
-  "org.manage",
-  "settings.hierarchy",
-  "settings.tenant",
-] as const;
-
-/** Department head: strong ops access without full tenant-wide admin config. */
-const VP_GM_ACTIONS = [
-  ...MANAGER_ACTIONS,
-  "org.manage",
-  "user.manage",
-  "role.manage",
-  "settings.hierarchy",
-] as const;
-
-const STAFF_ACTIONS = ["task.create", "task.update", "meeting.view", "report.view"] as const;
-
-const SUPPORTER_ACTIONS = [
-  "task.create",
-  "task.update",
-  "meeting.view",
-  "report.view",
-] as const;
-
-/** Stable codes for tenant hierarchy roles (Add user form). */
-export const TENANT_ASSIGNABLE_ROLE_CODES: readonly string[] = [
-  "ADMIN",
-  "VP_GM",
-  "MANAGER",
-  "STAFF",
-  "SUPPORTER",
-];
+import { keysToRolePermissionRows, P } from "../constants/permissions.js";
 
 /**
- * Which hierarchy roles a user can create, based on their own hierarchy role.
- * Kept separate from permission wiring so we can evolve it without changing permissions.
+ * Stable code for the one bootstrapped full-access tenant role.
+ * Display name is stored on `Role.name` and is editable (e.g. "Director", "Owner").
  */
-export const TENANT_CREATABLE_ROLE_CODES_BY_CREATOR: Readonly<
-  Record<string, readonly string[]>
-> = {
-  ADMIN: ["ADMIN", "VP_GM", "MANAGER", "STAFF", "SUPPORTER"],
-  VP_GM: ["MANAGER", "STAFF", "SUPPORTER"],
-  MANAGER: ["STAFF", "SUPPORTER"],
-  STAFF: [],
-  SUPPORTER: [],
-};
+export const TENANT_PRIMARY_ADMIN_ROLE_CODE = "COMPANY_ADMIN";
 
-export function creatableTenantRoleCodesForCreator(
-  creatorRoleCode: string | null | undefined,
-) {
-  if (!creatorRoleCode) return [];
-  return [...(TENANT_CREATABLE_ROLE_CODES_BY_CREATOR[creatorRoleCode] ?? [])];
-}
+/** Full access for the tenant primary admin role only. */
+const PRIMARY_ADMIN_KEYS = [
+  P.TASKS_READ,
+  P.TASKS_CREATE,
+  P.TASKS_UPDATE,
+  P.TASKS_DELETE,
+  P.TASKS_ASSIGN,
+  P.TASKS_REVIEW,
 
-const ROLE_DEFS: { code: string; name: string; actions: readonly string[] }[] =
-  [
-    {
-      code: "ADMIN",
-      name: "Company Admin / Director",
-      actions: ADMIN_ACTIONS,
-    },
-    {
-      code: "VP_GM",
-      name: "VP / GM (Department Head Level)",
-      actions: VP_GM_ACTIONS,
-    },
-    { code: "MANAGER", name: "Manager", actions: MANAGER_ACTIONS },
-    { code: "STAFF", name: "Staff / Doer", actions: STAFF_ACTIONS },
-    { code: "SUPPORTER", name: "Supporter", actions: SUPPORTER_ACTIONS },
-  ];
+  P.USERS_READ,
+  P.USERS_CREATE,
+  P.USERS_UPDATE,
+  P.USERS_DELETE,
 
-async function wireRolePermissions(
-  roleId: string,
-  actions: readonly string[],
-  byAction: Record<string, string>,
-) {
+  P.MEETINGS_READ,
+  P.MEETINGS_CREATE,
+  P.MEETINGS_UPDATE,
+  P.MEETINGS_DELETE,
+
+  P.REPORTS_READ,
+  P.REPORTS_CREATE,
+  P.REPORTS_UPDATE,
+  P.REPORTS_DELETE,
+
+  P.ROLES_READ,
+  P.ROLES_CREATE,
+  P.ROLES_UPDATE,
+  P.ROLES_DELETE,
+
+  P.DEPARTMENTS_READ,
+  P.DEPARTMENTS_CREATE,
+  P.DEPARTMENTS_UPDATE,
+  P.DEPARTMENTS_DELETE,
+
+  P.SETTINGS_READ,
+  P.SETTINGS_CREATE,
+  P.SETTINGS_UPDATE,
+  P.SETTINGS_DELETE,
+] as const;
+
+async function wireRolePermissions(roleId: string, keys: readonly string[]) {
   await prisma.rolePermission.deleteMany({ where: { roleId } });
-  for (const a of actions) {
-    const pid = byAction[a];
-    if (!pid) continue;
-    await prisma.rolePermission.create({
-      data: { roleId, permissionId: pid },
+  const rows = keysToRolePermissionRows([...keys]);
+  if (rows.length) {
+    await prisma.rolePermission.createMany({
+      data: rows.map((r) => ({
+        roleId,
+        module: r.module,
+        action: r.action,
+      })),
     });
   }
 }
 
+/** The tenant's bootstrapped company-admin role, if present (handles legacy `ADMIN` code). */
+export async function getTenantPrimaryAdminRole(tenantId: string) {
+  return prisma.role.findFirst({
+    where: {
+      tenantId,
+      OR: [{ code: TENANT_PRIMARY_ADMIN_ROLE_CODE }, { code: "ADMIN" }],
+    },
+  });
+}
+
+export function isTenantPrimaryAdminRoleRow(
+  row: { code: string } | null | undefined,
+) {
+  if (!row) return false;
+  return row.code === TENANT_PRIMARY_ADMIN_ROLE_CODE || row.code === "ADMIN";
+}
+
 /**
- * Ensures the five hierarchy roles exist with correct display names.
- * Wires default permissions only for **new** roles or roles that have no permissions yet
- * (so existing customized Admin/Manager/Staff roles are not reset).
+ * Ensures the tenant has exactly one primary admin role with full company permissions.
+ * Migrates legacy `ADMIN` row to `COMPANY_ADMIN` when found.
  */
-export async function ensureTenantHierarchyRoles(tenantId: string) {
-  const allPerms = await prisma.permission.findMany();
-  const byAction = Object.fromEntries(
-    allPerms.map((x) => [x.action, x.id]),
-  ) as Record<string, string>;
+export async function ensureTenantPrimaryAdminRole(tenantId: string) {
+  let primary =
+    (await prisma.role.findFirst({
+      where: { tenantId, code: TENANT_PRIMARY_ADMIN_ROLE_CODE },
+    })) ??
+    (await prisma.role.findFirst({
+      where: { tenantId, code: "ADMIN" },
+    }));
 
-  for (const def of ROLE_DEFS) {
-    const existing = await prisma.role.findFirst({
-      where: { tenantId, code: def.code },
+  if (primary && primary.code !== TENANT_PRIMARY_ADMIN_ROLE_CODE) {
+    primary = await prisma.role.update({
+      where: { id: primary.id },
+      data: { code: TENANT_PRIMARY_ADMIN_ROLE_CODE },
     });
-
-    if (!existing) {
-      const role = await prisma.role.create({
-        data: {
-          tenantId,
-          code: def.code,
-          name: def.name,
-          isSystem: true,
-        },
-      });
-      await wireRolePermissions(role.id, def.actions, byAction);
-      continue;
-    }
-
-    if (existing.name !== def.name) {
-      await prisma.role.update({
-        where: { id: existing.id },
-        data: { name: def.name },
-      });
-    }
-
-    const permCount = await prisma.rolePermission.count({
-      where: { roleId: existing.id },
-    });
-    if (permCount === 0) {
-      await wireRolePermissions(existing.id, def.actions, byAction);
-    }
   }
 
-  const adminR = await prisma.role.findFirstOrThrow({
-    where: { tenantId, code: "ADMIN" },
-  });
-  const mgrR = await prisma.role.findFirstOrThrow({
-    where: { tenantId, code: "MANAGER" },
-  });
-  const staffR = await prisma.role.findFirstOrThrow({
-    where: { tenantId, code: "STAFF" },
-  });
+  if (!primary) {
+    primary = await prisma.role.create({
+      data: {
+        tenantId,
+        code: TENANT_PRIMARY_ADMIN_ROLE_CODE,
+        name: "Company admin",
+        isSystem: true,
+      },
+    });
+  }
 
-  return {
-    adminRoleId: adminR.id,
-    managerRoleId: mgrR.id,
-    staffRoleId: staffR.id,
-  };
+  const permCount = await prisma.rolePermission.count({
+    where: { roleId: primary.id },
+  });
+  if (permCount === 0) {
+    await wireRolePermissions(primary.id, PRIMARY_ADMIN_KEYS);
+  }
+
+  return { primaryAdminRoleId: primary.id };
 }
 
 export async function bootstrapTenantDefaults(tenantId: string) {
-  const synced = await ensureTenantHierarchyRoles(tenantId);
+  const synced = await ensureTenantPrimaryAdminRole(tenantId);
 
   const statuses = [
     { code: "DRAFT", label: "Draft", isTerminal: false },
@@ -195,9 +153,24 @@ export async function bootstrapTenantDefaults(tenantId: string) {
     });
   }
 
-  return {
-    adminRoleId: synced.adminRoleId,
-    managerRoleId: synced.managerRoleId,
-    staffRoleId: synced.staffRoleId,
-  };
+  return { primaryAdminRoleId: synced.primaryAdminRoleId };
+}
+
+export async function assertActorMayAssignRole(input: {
+  tenantId: string;
+  actorRoleId: string;
+  targetRoleId: string;
+}): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  const primary = await getTenantPrimaryAdminRole(input.tenantId);
+  if (!primary) {
+    return { ok: false, status: 500, error: "Tenant roles not provisioned" };
+  }
+  if (input.targetRoleId === primary.id && input.actorRoleId !== primary.id) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Only a company admin may assign the company admin role",
+    };
+  }
+  return { ok: true };
 }

@@ -3,54 +3,52 @@ import { z } from "zod";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requirePlatformUser } from "../middleware/auth.middleware.js";
 import { requirePermission } from "../middleware/permission.middleware.js";
+import { P } from "../constants/permissions.js";
 import * as platformService from "../services/platform.service.js";
 import * as platformDashboardService from "../services/platformDashboard.service.js";
+import { usernameSchema } from "../utils/username.js";
 
 const router = Router();
 
 router.use(authMiddleware, requirePlatformUser);
 
-router.get(
-  "/tenants",
-  requirePermission("platform.tenant.list"),
-  async (req, res) => {
-    const q = z
-      .object({
-        page: z.preprocess(
-          (v) => (v === undefined || v === "" ? 1 : v),
-          z.coerce.number().int().min(1),
+router.get("/tenants", requirePermission(P.PLATFORM_READ), async (req, res) => {
+  const q = z
+    .object({
+      page: z.preprocess(
+        (v) => (v === undefined || v === "" ? 1 : v),
+        z.coerce.number().int().min(1),
+      ),
+      pageSize: z.preprocess(
+        (v) => (v === undefined || v === "" ? 10 : v),
+        z.coerce.number().int().min(1).max(200),
+      ),
+      search: z
+        .string()
+        .optional()
+        .transform((s) =>
+          s && String(s).trim() ? String(s).trim() : undefined,
         ),
-        pageSize: z.preprocess(
-          (v) => (v === undefined || v === "" ? 10 : v),
-          z.coerce.number().int().min(1).max(200),
-        ),
-        search: z
-          .string()
-          .optional()
-          .transform((s) =>
-            s && String(s).trim() ? String(s).trim() : undefined,
-          ),
-        status: z.enum(["INVITED", "ACTIVE", "INACTIVE"]).optional(),
-        sortBy: z.enum(["createdAt", "name", "users"]).default("createdAt"),
-        sortDir: z.enum(["asc", "desc"]).default("desc"),
-      })
-      .parse(req.query);
+      status: z.enum(["INVITED", "ACTIVE", "INACTIVE"]).optional(),
+      sortBy: z.enum(["createdAt", "name", "users"]).default("createdAt"),
+      sortDir: z.enum(["asc", "desc"]).default("desc"),
+    })
+    .parse(req.query);
 
-    const result = await platformService.listTenantsPaginated({
-      page: q.page,
-      pageSize: q.pageSize,
-      search: q.search,
-      status: q.status,
-      sortBy: q.sortBy,
-      sortDir: q.sortDir,
-    });
-    res.json(result);
-  },
-);
+  const result = await platformService.listTenantsPaginated({
+    page: q.page,
+    pageSize: q.pageSize,
+    search: q.search,
+    status: q.status,
+    sortBy: q.sortBy,
+    sortDir: q.sortDir,
+  });
+  res.json(result);
+});
 
 router.get(
   "/tenants/:id",
-  requirePermission("platform.tenant.list"),
+  requirePermission(P.PLATFORM_READ),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     try {
@@ -66,7 +64,7 @@ router.get(
 
 router.get(
   "/dashboard",
-  requirePermission("platform.tenant.list"),
+  requirePermission(P.PLATFORM_READ),
   async (_req, res) => {
     const dashboard = await platformDashboardService.getPlatformDashboard();
     res.json(dashboard);
@@ -75,7 +73,7 @@ router.get(
 
 router.post(
   "/tenants",
-  requirePermission("platform.tenant.create"),
+  requirePermission(P.PLATFORM_CREATE),
   async (req, res) => {
     const body = z
       .object({
@@ -84,13 +82,14 @@ router.post(
           .string()
           .min(2)
           .regex(/^[a-z0-9-]+$/),
-        adminEmail: z.string().email(),
+        adminUsername: usernameSchema,
+        tempPassword: z.string().min(8).max(200),
       })
       .parse(req.body);
     try {
-      const { tenant, inviteLink } =
-        await platformService.createTenantWithInvitation(body);
-      res.status(201).json({ tenant, inviteLink });
+      const { tenant, adminUser } =
+        await platformService.createTenantWithAdminUser(body);
+      res.status(201).json({ tenant, adminUser });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }
@@ -99,7 +98,7 @@ router.post(
 
 router.patch(
   "/tenants/:id",
-  requirePermission("platform.tenant.manage"),
+  requirePermission(P.PLATFORM_UPDATE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const body = z.object({ name: z.string().min(1) }).parse(req.body);
@@ -117,7 +116,7 @@ router.patch(
 
 router.patch(
   "/tenants/:id/status",
-  requirePermission("platform.tenant.manage"),
+  requirePermission(P.PLATFORM_UPDATE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const body = z
@@ -133,21 +132,9 @@ router.patch(
   },
 );
 
-router.post(
-  "/tenants/:id/reinvite",
-  requirePermission("platform.tenant.manage"),
-  async (req, res) => {
-    const params = z.object({ id: z.string().min(1) }).parse(req.params);
-    const result = await platformService.reinviteTenantAdmin({
-      tenantId: params.id,
-    });
-    res.json(result);
-  },
-);
-
 router.delete(
   "/tenants/:id",
-  requirePermission("platform.tenant.manage"),
+  requirePermission(P.PLATFORM_UPDATE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     try {

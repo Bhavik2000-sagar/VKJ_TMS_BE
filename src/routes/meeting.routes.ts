@@ -4,29 +4,27 @@ import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireTenantUser } from "../middleware/auth.middleware.js";
 import * as meetingService from "../services/meeting.service.js";
 import { prisma } from "../lib/prisma.js";
+import { P } from "../constants/permissions.js";
 
 const router = Router();
 router.use(authMiddleware, requireTenantUser);
 
 function requireMeetingView(req: any, res: any, next: any) {
   const perms: Set<string> | undefined = req.effectivePermissions;
-  if (perms?.has("meeting.view") || perms?.has("meeting.manage")) return next();
+  if (perms?.has(P.MEETINGS_READ) || perms?.has(P.MEETINGS_UPDATE))
+    return next();
   res.status(403).json({ error: "Forbidden" });
 }
 
 function requireMeetingManage(req: any, res: any, next: any) {
   const perms: Set<string> | undefined = req.effectivePermissions;
-  if (perms?.has("meeting.manage")) return next();
+  if (perms?.has(P.MEETINGS_UPDATE)) return next();
   res.status(403).json({ error: "Forbidden" });
 }
 
-async function requireMeetingManageOrCreator(
-  req: any,
-  res: any,
-  next: any,
-) {
+async function requireMeetingManageOrCreator(req: any, res: any, next: any) {
   const perms: Set<string> | undefined = req.effectivePermissions;
-  if (perms?.has("meeting.manage")) return next();
+  if (perms?.has(P.MEETINGS_UPDATE)) return next();
   const meetingId = String(req.params.id ?? "");
   if (!meetingId) {
     res.status(400).json({ error: "Meeting id required" });
@@ -53,9 +51,13 @@ async function requireMeetingManageOrCreatorIfScheduled(
   next: any,
 ) {
   const perms: Set<string> | undefined = req.effectivePermissions;
-  if (perms?.has("meeting.manage")) return next();
+  if (perms?.has(P.MEETINGS_UPDATE)) return next();
   const meetingId = String(req.params.id ?? "");
-  const m = await meetingService.getMeeting(req.userId!, req.tenantId!, meetingId);
+  const m = await meetingService.getMeeting(
+    req.userId!,
+    req.tenantId!,
+    meetingId,
+  );
   if (!m) {
     res.status(404).json({ error: "Not found" });
     return;
@@ -68,18 +70,19 @@ async function requireMeetingManageOrCreatorIfScheduled(
   next();
 }
 
-router.get(
-  "/eligible-attendees",
-  requireMeetingView,
-  async (req, res) => {
-    const users = await prisma.user.findMany({
-      where: { tenantId: req.tenantId! },
-      select: { id: true, name: true, email: true },
-      orderBy: { name: "asc" },
-    });
-    res.json({ users });
-  },
-);
+router.get("/eligible-attendees", requireMeetingView, async (req, res) => {
+  const users = await prisma.user.findMany({
+    where: {
+      tenantId: req.tenantId!,
+      ...(req.departmentScopeIds?.length
+        ? { departmentId: { in: req.departmentScopeIds } }
+        : {}),
+    },
+    select: { id: true, name: true, username: true },
+    orderBy: { name: "asc" },
+  });
+  res.json({ users });
+});
 
 router.get("/", requireMeetingView, async (req, res) => {
   const query = z
@@ -88,7 +91,9 @@ router.get("/", requireMeetingView, async (req, res) => {
       pageSize: z.coerce.number().int().min(1).max(100).optional(),
       search: z.string().trim().optional(),
       priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional(),
-      status: z.enum(["SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"]).optional(),
+      status: z
+        .enum(["SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"])
+        .optional(),
       sortBy: z.enum(["datetime", "title", "createdAt"]).optional(),
       sortDir: z.enum(["asc", "desc"]).optional(),
     })
@@ -183,53 +188,39 @@ router.post("/", requireMeetingView, async (req, res) => {
   res.status(201).json({ meeting });
 });
 
-router.patch("/:id", requireMeetingManageOrCreatorIfScheduled, async (req, res) => {
-  const params = z.object({ id: z.string().min(1) }).parse(req.params);
-  const body = z
-    .object({
-      title: z.string().min(1).optional(),
-      agenda: z.string().optional().nullable(),
-      meetingLink: z.string().url().optional().nullable(),
-      preparationNotes: z.string().optional().nullable(),
-      priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional(),
-      durationMinutes: z.coerce
-        .number()
-        .int()
-        .min(5)
-        .max(1440)
-        .optional()
-        .nullable(),
-      datetime: z.string().datetime().optional(),
-      attendeeIds: z.array(z.string()).optional(),
-    })
-    .parse(req.body);
-
-  const { datetime, ...rest } = body;
-  const meeting = await meetingService.updateMeeting(
-    req.userId!,
-    req.tenantId!,
-    params.id,
-    {
-      ...rest,
-      ...(datetime ? { datetime: new Date(datetime) } : {}),
-    },
-  );
-  if (!meeting) {
-    res.status(404).json({ error: "Not found" });
-    return;
-  }
-  res.json({ meeting });
-});
-
-router.post(
-  "/:id/cancel",
-  requireMeetingManageOrCreator,
+router.patch(
+  "/:id",
+  requireMeetingManageOrCreatorIfScheduled,
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
-    const meeting = await meetingService.cancelMeeting(
+    const body = z
+      .object({
+        title: z.string().min(1).optional(),
+        agenda: z.string().optional().nullable(),
+        meetingLink: z.string().url().optional().nullable(),
+        preparationNotes: z.string().optional().nullable(),
+        priority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]).optional(),
+        durationMinutes: z.coerce
+          .number()
+          .int()
+          .min(5)
+          .max(1440)
+          .optional()
+          .nullable(),
+        datetime: z.string().datetime().optional(),
+        attendeeIds: z.array(z.string()).optional(),
+      })
+      .parse(req.body);
+
+    const { datetime, ...rest } = body;
+    const meeting = await meetingService.updateMeeting(
       req.userId!,
       req.tenantId!,
       params.id,
+      {
+        ...rest,
+        ...(datetime ? { datetime: new Date(datetime) } : {}),
+      },
     );
     if (!meeting) {
       res.status(404).json({ error: "Not found" });
@@ -238,6 +229,20 @@ router.post(
     res.json({ meeting });
   },
 );
+
+router.post("/:id/cancel", requireMeetingManageOrCreator, async (req, res) => {
+  const params = z.object({ id: z.string().min(1) }).parse(req.params);
+  const meeting = await meetingService.cancelMeeting(
+    req.userId!,
+    req.tenantId!,
+    params.id,
+  );
+  if (!meeting) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  res.json({ meeting });
+});
 
 router.post(
   "/:id/complete",

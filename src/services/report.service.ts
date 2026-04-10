@@ -1,8 +1,16 @@
 import { prisma } from "../lib/prisma.js";
 import * as taskService from "./task.service.js";
 
-export async function dashboardStats(userId: string, tenantId: string) {
-  const tasks = await taskService.listTasks(userId, tenantId);
+export async function dashboardStats(
+  userId: string,
+  tenantId: string,
+  departmentScopeIds?: string[] | null,
+) {
+  const tasks = await taskService.listTasks(
+    userId,
+    tenantId,
+    departmentScopeIds ?? undefined,
+  );
   const byStatus = tasks.reduce(
     (acc, t) => {
       const k = t.status.code;
@@ -21,15 +29,27 @@ export async function dashboardStats(userId: string, tenantId: string) {
   };
 }
 
-export async function taskSummaryByUser(tenantId: string) {
+export async function taskSummaryByUser(
+  tenantId: string,
+  departmentScopeIds?: string[] | null,
+) {
   const rows = await prisma.task.groupBy({
     by: ["assignedToId"],
-    where: { tenantId, assignedToId: { not: null } },
+    where: {
+      tenantId,
+      assignedToId: { not: null },
+      ...(departmentScopeIds?.length
+        ? { departmentId: { in: departmentScopeIds } }
+        : {}),
+    },
     _count: { id: true },
   });
   const users = await prisma.user.findMany({
-    where: { tenantId, id: { in: rows.map((r) => r.assignedToId!).filter(Boolean) } },
-    select: { id: true, name: true, email: true },
+    where: {
+      tenantId,
+      id: { in: rows.map((r) => r.assignedToId!).filter(Boolean) },
+    },
+    select: { id: true, name: true, username: true },
   });
   const byId = Object.fromEntries(users.map((u) => [u.id, u]));
   return rows.map((r) => ({

@@ -1,8 +1,7 @@
 import { prisma } from "../lib/prisma.js";
-import { hashToken, randomToken } from "../utils/crypto.js";
+import { randomToken } from "../utils/crypto.js";
 import { bootstrapTenantDefaults } from "./tenantBootstrap.service.js";
-import { sendTenantInvitationEmail } from "./email.service.js";
-import { env } from "../config/env.js";
+import bcrypt from "bcryptjs";
 
 export async function listTenants() {
   const result = await listTenantsPaginated({
@@ -58,29 +57,20 @@ export async function getTenantDetails(input: { tenantId: string }) {
   });
   if (!tenant) throw new Error("Tenant not found");
 
-  const latestInvitation = await prisma.tenantInvitation.findFirst({
-    where: { tenantId: tenant.id },
-    orderBy: { createdAt: "desc" },
-  });
-
   const adminUser = await prisma.user.findFirst({
-    where: { tenantId: tenant.id, role: { code: "ADMIN" } },
+    where: {
+      tenantId: tenant.id,
+      role: {
+        OR: [{ code: "COMPANY_ADMIN" }, { code: "ADMIN" }],
+      },
+    },
     orderBy: { createdAt: "asc" },
-    select: { id: true, email: true, name: true, createdAt: true },
+    select: { id: true, username: true, name: true, createdAt: true },
   });
 
   return {
     tenant,
     adminUser,
-    latestInvitation: latestInvitation
-      ? {
-          id: latestInvitation.id,
-          email: latestInvitation.email,
-          createdAt: latestInvitation.createdAt,
-          consumedAt: latestInvitation.consumedAt,
-          expiresAt: latestInvitation.expiresAt,
-        }
-      : null,
   };
 }
 
@@ -93,42 +83,43 @@ export async function updateTenant(input: { tenantId: string; name: string }) {
   });
 }
 
-export async function createTenantWithInvitation(input: {
+export async function createTenantWithAdminUser(input: {
   name: string;
   slug: string;
-  adminEmail: string;
+  adminUsername: string;
+  tempPassword: string;
 }) {
-  const email = input.adminEmail.trim().toLowerCase();
+  const username = input.adminUsername.trim().toLowerCase();
 
-  const existingUser = await prisma.user.findUnique({ where: { email } });
+  const existingUser = await prisma.user.findUnique({ where: { username } });
   if (existingUser) {
-    throw new Error("Admin email already exists");
-  }
-
-  const existingPendingInvite = await prisma.tenantInvitation.findFirst({
-    where: {
-      email,
-      consumedAt: null,
-      expiresAt: { gt: new Date() },
-    },
-  });
-  if (existingPendingInvite) {
-    throw new Error("Admin email already has a pending invitation");
+    throw new Error("Admin username already exists");
   }
 
   const slug = await ensureUniqueTenantSlug(input.slug);
   const tenant = await prisma.tenant.create({
-    data: { name: input.name, slug, status: "INVITED" },
+    data: { name: input.name, slug, status: "ACTIVE" },
   });
   await bootstrapTenantDefaults(tenant.id);
 
-  const inviteLink = await createAndSendTenantInvitation({
-    tenantId: tenant.id,
-    tenantName: tenant.name,
-    email,
+  const adminRole = await prisma.role.findFirst({
+    where: { tenantId: tenant.id, code: "COMPANY_ADMIN" },
+  });
+  if (!adminRole) throw new Error("Tenant not bootstrapped");
+
+  const passwordHash = await bcrypt.hash(input.tempPassword, 12);
+  const adminUser = await prisma.user.create({
+    data: {
+      tenantId: tenant.id,
+      username,
+      passwordHash,
+      name: "Company admin",
+      roleId: adminRole.id,
+    },
+    select: { id: true, username: true, name: true, createdAt: true },
   });
 
-  return { tenant, inviteLink };
+  return { tenant, adminUser };
 }
 
 async function ensureUniqueTenantSlug(baseSlug: string) {
@@ -153,95 +144,6 @@ async function ensureUniqueTenantSlug(baseSlug: string) {
   return `${base}-${suffix || "x"}`;
 }
 
-async function createAndSendTenantInvitation(input: {
-  tenantId: string;
-  tenantName: string;
-  email: string;
-  isReinvite?: boolean;
-}) {
-  const email = input.email.trim().toLowerCase();
-
-  const existingUser = await prisma.user.findUnique({ where: { email } });
-  if (existingUser) {
-    throw new Error("Email already exists");
-  }
-
-  const raw = randomToken(32);
-  const tokenHash = hashToken(raw);
-  const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 7);
-
-  await prisma.tenantInvitation.create({
-    data: {
-      tenantId: input.tenantId,
-      email,
-      tokenHash,
-      expiresAt,
-    },
-  });
-
-  const inviteLink = `${env.FRONTEND_URL.replace(/\/$/, "")}/accept-invite?token=${raw}`;
-  try {
-    await sendTenantInvitationEmail({
-      to: email,
-      tenantName: input.tenantName,
-      inviteLink,
-      isReinvite: input.isReinvite,
-    });
-  } catch (e) {
-    // We still want tenant provisioning to succeed even if SMTP is misconfigured.
-    console.warn(
-      "[email] Failed to send tenant invitation email:",
-      (e as Error)?.message ?? e,
-    );
-  }
-
-  return inviteLink;
-}
-
-export async function acceptTenantInvitation(input: {
-  token: string;
-  password: string;
-  name: string;
-}) {
-  const tokenHash = hashToken(input.token);
-  const inv = await prisma.tenantInvitation.findFirst({
-    where: { tokenHash, consumedAt: null, expiresAt: { gt: new Date() } },
-  });
-  if (!inv) throw new Error("Invalid or expired invitation");
-
-  const adminRole = await prisma.role.findFirst({
-    where: { tenantId: inv.tenantId, code: "ADMIN" },
-  });
-  if (!adminRole) throw new Error("Tenant not bootstrapped");
-
-  const bcrypt = await import("bcryptjs");
-  const passwordHash = await bcrypt.default.hash(input.password, 12);
-
-  const user = await prisma.user.create({
-    data: {
-      tenantId: inv.tenantId,
-      email: inv.email,
-      passwordHash,
-      name: input.name,
-      roleId: adminRole.id,
-    },
-    include: { role: true },
-  });
-
-  await prisma.tenantInvitation.update({
-    where: { id: inv.id },
-    data: { consumedAt: new Date() },
-  });
-
-  await prisma.tenant.update({
-    where: { id: inv.tenantId },
-    data: { status: "ACTIVE" },
-  });
-
-  return user;
-}
-
 export async function setTenantStatus(input: {
   tenantId: string;
   status: "ACTIVE" | "INVITED" | "INACTIVE";
@@ -250,33 +152,6 @@ export async function setTenantStatus(input: {
     where: { id: input.tenantId },
     data: { status: input.status },
   });
-}
-
-export async function reinviteTenantAdmin(input: { tenantId: string }) {
-  const tenant = await prisma.tenant.findUnique({
-    where: { id: input.tenantId },
-  });
-  if (!tenant) throw new Error("Tenant not found");
-
-  const last = await prisma.tenantInvitation.findFirst({
-    where: { tenantId: input.tenantId },
-    orderBy: { createdAt: "desc" },
-  });
-  if (!last) throw new Error("No invitation email found for this tenant");
-
-  const inviteLink = await createAndSendTenantInvitation({
-    tenantId: tenant.id,
-    tenantName: tenant.name,
-    email: last.email,
-    isReinvite: true,
-  });
-
-  await prisma.tenant.update({
-    where: { id: tenant.id },
-    data: { status: "INVITED" },
-  });
-
-  return { inviteLink };
 }
 
 export async function deleteTenant(input: { tenantId: string }) {
@@ -314,9 +189,6 @@ export async function deleteTenant(input: { tenantId: string }) {
       await tx.passwordResetToken.deleteMany({
         where: { userId: { in: userIds } },
       });
-      await tx.userPermission.deleteMany({
-        where: { userId: { in: userIds } },
-      });
     }
 
     // Meetings (outcomes/attendees depend on meetingId).
@@ -350,7 +222,6 @@ export async function deleteTenant(input: { tenantId: string }) {
     await tx.department.deleteMany({ where: { tenantId: tenant.id } });
     await tx.branch.deleteMany({ where: { tenantId: tenant.id } });
     await tx.template.deleteMany({ where: { tenantId: tenant.id } });
-    await tx.tenantInvitation.deleteMany({ where: { tenantId: tenant.id } });
 
     // Roles/users (roleId FK requires users first).
     await tx.user.deleteMany({ where: { tenantId: tenant.id } });

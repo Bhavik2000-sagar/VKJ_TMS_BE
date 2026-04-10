@@ -21,9 +21,9 @@ export async function listMeetings(userId: string, tenantId: string) {
       OR: [{ createdById: userId }, { attendees: { some: { userId } } }],
     },
     include: {
-      createdBy: { select: { id: true, name: true, email: true } },
+      createdBy: { select: { id: true, name: true, username: true } },
       attendees: {
-        include: { user: { select: { id: true, name: true, email: true } } },
+        include: { user: { select: { id: true, name: true, username: true } } },
       },
       outcomes: { include: { task: { select: { id: true, title: true } } } },
     },
@@ -75,7 +75,7 @@ export async function listMeetingsPaginated(input: {
         status: true,
         datetime: true,
         createdAt: true,
-        createdBy: { select: { id: true, name: true, email: true } },
+        createdBy: { select: { id: true, name: true, username: true } },
         attendees: { select: { userId: true } },
       },
     });
@@ -87,7 +87,9 @@ export async function listMeetingsPaginated(input: {
         durationMinutes: m.durationMinutes,
       }),
     }));
-    const filtered = withComputed.filter((m) => m.computedStatus === input.status);
+    const filtered = withComputed.filter(
+      (m) => m.computedStatus === input.status,
+    );
     const total = filtered.length;
     const start = (input.page - 1) * input.pageSize;
     const end = start + input.pageSize;
@@ -111,7 +113,7 @@ export async function listMeetingsPaginated(input: {
         status: true,
         datetime: true,
         createdAt: true,
-        createdBy: { select: { id: true, name: true, email: true } },
+        createdBy: { select: { id: true, name: true, username: true } },
         attendees: { select: { userId: true } },
       },
     }),
@@ -138,9 +140,9 @@ export async function getMeeting(
   const m = await prisma.meeting.findFirst({
     where: { id: meetingId, tenantId },
     include: {
-      createdBy: { select: { id: true, name: true, email: true } },
+      createdBy: { select: { id: true, name: true, username: true } },
       attendees: {
-        include: { user: { select: { id: true, name: true, email: true } } },
+        include: { user: { select: { id: true, name: true, username: true } } },
       },
       outcomes: { include: { task: { select: { id: true, title: true } } } },
     },
@@ -271,9 +273,11 @@ export async function updateMeeting(
         ...(data.datetime !== undefined ? { datetime: data.datetime } : {}),
       },
       include: {
-        createdBy: { select: { id: true, name: true, email: true } },
+        createdBy: { select: { id: true, name: true, username: true } },
         attendees: {
-          include: { user: { select: { id: true, name: true, email: true } } },
+          include: {
+            user: { select: { id: true, name: true, username: true } },
+          },
         },
         outcomes: { include: { task: { select: { id: true, title: true } } } },
       },

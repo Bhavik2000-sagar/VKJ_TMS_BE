@@ -3,6 +3,7 @@ import { prisma } from "../lib/prisma.js";
 import { verifyAccessToken } from "../utils/jwt.js";
 import { getEffectivePermissionActions } from "../services/permission.service.js";
 import { getAccessCookieName } from "../services/auth.service.js";
+import { resolveDepartmentScopeIds } from "../services/tenantScope.service.js";
 
 export const authMiddleware: RequestHandler = async (req, res, next) => {
   const token = req.cookies?.[getAccessCookieName()];
@@ -16,7 +17,10 @@ export const authMiddleware: RequestHandler = async (req, res, next) => {
     req.tenantId = payload.tid;
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
-      include: { role: true, tenant: true },
+      include: {
+        role: { select: { id: true, code: true, departmentId: true } },
+        tenant: true,
+      },
     });
     if (!user) {
       res.status(401).json({ error: "Unauthorized" });
@@ -28,6 +32,14 @@ export const authMiddleware: RequestHandler = async (req, res, next) => {
     }
     req.user = user;
     req.effectivePermissions = await getEffectivePermissionActions(user.id);
+    if (user.tenantId && user.role?.departmentId) {
+      req.departmentScopeIds = await resolveDepartmentScopeIds(
+        user.tenantId,
+        user.role.departmentId,
+      );
+    } else {
+      req.departmentScopeIds = null;
+    }
     next();
   } catch {
     res.status(401).json({ error: "Unauthorized" });

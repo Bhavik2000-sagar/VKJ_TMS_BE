@@ -3,15 +3,13 @@ import { z } from "zod";
 import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireTenantUser } from "../middleware/auth.middleware.js";
 import { requirePermission } from "../middleware/permission.middleware.js";
+import { P } from "../constants/permissions.js";
 import { prisma } from "../lib/prisma.js";
-import { ensureTenantHierarchyRoles } from "../services/tenantBootstrap.service.js";
 
 const router = Router();
 router.use(authMiddleware, requireTenantUser);
 
-router.get("/members", requirePermission("team.view"), async (req, res) => {
-  await ensureTenantHierarchyRoles(req.tenantId!);
-
+router.get("/members", requirePermission(P.USERS_READ), async (req, res) => {
   const query = z
     .object({
       page: z.coerce.number().int().min(1).default(1),
@@ -21,26 +19,32 @@ router.get("/members", requirePermission("team.view"), async (req, res) => {
       roleId: z.string().min(1).optional(),
       status: z.enum(["active", "inactive"]).optional(),
       sortBy: z
-        .enum(["name", "email", "employeeCode", "createdAt"])
+        .enum(["name", "username", "employeeCode", "createdAt"])
         .default("createdAt"),
       sortDir: z.enum(["asc", "desc"]).default("desc"),
     })
     .parse(req.query);
 
-  const requesterRoleCode = req.user?.role?.code ?? null;
-  const roleScope =
-    requesterRoleCode === "ADMIN"
-      ? null
-      : requesterRoleCode === "VP_GM"
-        ? (["MANAGER", "STAFF", "SUPPORTER"] as const)
-        : requesterRoleCode === "MANAGER"
-          ? (["STAFF", "SUPPORTER"] as const)
-          : null;
-
   const term = query.search?.trim();
-  const baseWhere = {
+  const scopeSet = req.departmentScopeIds?.length
+    ? new Set(req.departmentScopeIds)
+    : null;
+  let departmentFilter:
+    | { departmentId: string | { in: string[] } }
+    | Record<string, never> = {};
+  if (scopeSet && query.departmentId) {
+    departmentFilter = scopeSet.has(query.departmentId)
+      ? { departmentId: query.departmentId }
+      : { departmentId: { in: [] } };
+  } else if (scopeSet) {
+    departmentFilter = { departmentId: { in: [...scopeSet] } };
+  } else if (query.departmentId) {
+    departmentFilter = { departmentId: query.departmentId };
+  }
+
+  const where = {
     tenantId: req.tenantId!,
-    ...(query.departmentId ? { departmentId: query.departmentId } : {}),
+    ...departmentFilter,
     ...(query.roleId ? { roleId: query.roleId } : {}),
     ...(query.status
       ? { isActive: query.status === "active" ? true : false }
@@ -49,27 +53,12 @@ router.get("/members", requirePermission("team.view"), async (req, res) => {
       ? {
           OR: [
             { name: { contains: term } },
-            { email: { contains: term } },
+            { username: { contains: term } },
             { employeeCode: { contains: term } },
           ],
         }
       : {}),
   };
-
-  // Role-based visibility (admin sees all).
-  // VP_GM: MANAGER/STAFF/SUPPORTER
-  // MANAGER: STAFF/SUPPORTER
-  // Always include self so the logged-in user doesn't disappear from the list.
-  const where =
-    roleScope == null
-      ? baseWhere
-      : {
-          ...baseWhere,
-          OR: [
-            { id: req.user!.id },
-            { role: { code: { in: [...roleScope] } } },
-          ],
-        };
 
   const [total, users] = await Promise.all([
     prisma.user.count({ where }),
@@ -80,7 +69,7 @@ router.get("/members", requirePermission("team.view"), async (req, res) => {
       take: query.pageSize,
       select: {
         id: true,
-        email: true,
+        username: true,
         name: true,
         isActive: true,
         managerId: true,

@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma.js";
+import { permissionKey } from "../constants/permissions.js";
 
 export async function getEffectivePermissionActions(userId: string): Promise<Set<string>> {
   const user = await prisma.user.findUnique({
@@ -6,21 +7,16 @@ export async function getEffectivePermissionActions(userId: string): Promise<Set
     include: {
       role: {
         include: {
-          rolePermissions: { include: { permission: true } },
+          rolePermissions: true,
         },
       },
-      userPermissions: { include: { permission: true } },
     },
   });
   if (!user) return new Set();
 
-  const set = new Set(user.role.rolePermissions.map((rp) => rp.permission.action));
-  for (const up of user.userPermissions) {
-    const a = up.permission.action;
-    if (up.granted) set.add(a);
-    else set.delete(a);
-  }
-  return set;
+  return new Set(
+    user.role.rolePermissions.map((rp) => permissionKey(rp.module, rp.action)),
+  );
 }
 
 export async function assertPermission(userId: string, action: string): Promise<void> {

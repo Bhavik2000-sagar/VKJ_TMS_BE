@@ -42,7 +42,6 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  invitations  TenantInvitation[]
   users        User[]
   roles        Role[]
   branches     Branch[]
@@ -51,6 +50,24 @@ model Tenant {
   tasks        Task[]
   meetings     Meeting[]
   templates    Template[]
+  slaRules     SlaRule[]
+}
+
+model SlaRule {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  targetHours Int
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tasks  Task[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([isActive])
 }
 
 model Branch {
@@ -74,6 +91,7 @@ model Department {
   id        String   @id @default(cuid())
   tenantId  String
   branchId  String?
+  parentId  String?
   name      String
   code      String?
   createdAt DateTime @default(now())
@@ -81,33 +99,22 @@ model Department {
 
   tenant Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   branch Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  parent Department? @relation("DepartmentHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children Department[] @relation("DepartmentHierarchy")
   users  User[]
   tasks  Task[]
+  roles  Role[]
 
   @@unique([tenantId, name])
   @@index([tenantId])
   @@index([branchId])
-}
-
-model TenantInvitation {
-  id         String    @id @default(cuid())
-  tenantId   String
-  email      String
-  tokenHash  String
-  expiresAt  DateTime
-  consumedAt DateTime?
-  createdAt  DateTime  @default(now())
-
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  @@index([tokenHash])
-  @@index([tenantId, email])
+  @@index([parentId])
 }
 
 model User {
   id           String   @id @default(cuid())
   tenantId     String?
-  email        String   @unique
+  username     String   @unique
   passwordHash String
   name         String
   isActive     Boolean  @default(true)
@@ -139,7 +146,6 @@ model User {
   meetingsCreated Meeting[] @relation("MeetingCreator")
   meetingAttendees MeetingAttendee[]
   notifications Notification[]
-  userPermissions UserPermission[]
   refreshTokens RefreshToken[]
   passwordResetTokens PasswordResetToken[]
 
@@ -153,6 +159,7 @@ model User {
 model Role {
   id        String   @id @default(cuid())
   tenantId  String?
+  departmentId String?
   code      String
   name      String
   isSystem  Boolean  @default(false)
@@ -160,42 +167,24 @@ model Role {
   updatedAt DateTime @updatedAt
 
   tenant          Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  department     Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   users           User[]
   rolePermissions RolePermission[]
 
   @@unique([tenantId, code])
-}
-
-model Permission {
-  id          String @id @default(cuid())
-  action      String @unique
-  module      String
-  description String?
-
-  rolePermissions RolePermission[]
-  userPermissions UserPermission[]
+  @@index([tenantId])
+  @@index([departmentId])
 }
 
 model RolePermission {
-  roleId       String
-  permissionId String
+  roleId String
+  module String
+  action String
 
-  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
-  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
-  @@id([roleId, permissionId])
-}
-
-model UserPermission {
-  id           String  @id @default(cuid())
-  userId       String
-  permissionId String
-  granted      Boolean
-
-  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, permissionId])
+  @@id([roleId, module, action])
+  @@index([module, action])
 }
 
 model TaskStatus {
@@ -243,6 +232,8 @@ model Task {
   tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   status      TaskStatus @relation(fields: [statusId], references: [id])
   meeting     Meeting?   @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+  slaRuleId   String?
+  slaRule     SlaRule?   @relation(fields: [slaRuleId], references: [id], onDelete: SetNull)
   assignedTo  User?      @relation("TaskAssigned", fields: [assignedToId], references: [id])
   reviewer    User?      @relation("TaskReviewer", fields: [reviewerId], references: [id])
   supporter   User?      @relation("TaskSupporter", fields: [supporterId], references: [id])
@@ -260,6 +251,7 @@ model Task {
   @@index([meetingId])
   @@index([branchId])
   @@index([departmentId])
+  @@index([slaRuleId])
 }
 
 model TaskChecklistItem {

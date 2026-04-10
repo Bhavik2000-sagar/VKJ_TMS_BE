@@ -4,6 +4,7 @@ import { authMiddleware } from "../middleware/auth.middleware.js";
 import { requireTenantUser } from "../middleware/auth.middleware.js";
 import { requirePermission } from "../middleware/permission.middleware.js";
 import * as taskService from "../services/task.service.js";
+import { P } from "../constants/permissions.js";
 import { prisma } from "../lib/prisma.js";
 import multer from "multer";
 import path from "path";
@@ -16,6 +17,10 @@ const upload = multer({ dest: uploadDir });
 
 router.use(authMiddleware, requireTenantUser);
 
+function deptScope(req: Express.Request) {
+  return req.departmentScopeIds ?? undefined;
+}
+
 router.get("/statuses", async (req, res) => {
   const tenantId = req.tenantId!;
   const statuses = await prisma.taskStatus.findMany({
@@ -27,18 +32,23 @@ router.get("/statuses", async (req, res) => {
 
 router.get(
   "/assignable-users",
-  requirePermission("task.create"),
+  requirePermission(P.TASKS_CREATE),
   async (req, res) => {
     const users = await prisma.user.findMany({
-      where: { tenantId: req.tenantId! },
-      select: { id: true, name: true, email: true },
+      where: {
+        tenantId: req.tenantId!,
+        ...(req.departmentScopeIds?.length
+          ? { departmentId: { in: req.departmentScopeIds } }
+          : {}),
+      },
+      select: { id: true, name: true, username: true },
       orderBy: { name: "asc" },
     });
     res.json({ users });
   },
 );
 
-router.get("/", requirePermission("task.update"), async (req, res) => {
+router.get("/", requirePermission(P.TASKS_UPDATE), async (req, res) => {
   const q = z
     .object({
       page: z.preprocess(
@@ -130,15 +140,17 @@ router.get("/", requirePermission("task.update"), async (req, res) => {
       sortBy: q.sortBy,
       sortDir: q.sortDir,
     },
+    deptScope(req),
   );
   res.json(result);
 });
 
-router.get("/:id", requirePermission("task.update"), async (req, res) => {
+router.get("/:id", requirePermission(P.TASKS_UPDATE), async (req, res) => {
   const task = await taskService.getTask(
     req.userId!,
     req.tenantId!,
     String(req.params.id),
+    deptScope(req),
   );
   if (!task) {
     res.status(404).json({ error: "Not found" });
@@ -147,7 +159,7 @@ router.get("/:id", requirePermission("task.update"), async (req, res) => {
   res.json({ task });
 });
 
-router.post("/", requirePermission("task.create"), async (req, res) => {
+router.post("/", requirePermission(P.TASKS_CREATE), async (req, res) => {
   const body = z
     .object({
       title: z.string().min(1),
@@ -168,7 +180,7 @@ router.post("/", requirePermission("task.create"), async (req, res) => {
     s && String(s).trim() !== "" ? new Date(s) : null;
 
   // Users without task.assign (e.g., Staff/Supporter) cannot assign tasks to others.
-  const canAssign = Boolean(req.effectivePermissions?.has("task.assign"));
+  const canAssign = Boolean(req.effectivePermissions?.has(P.TASKS_ASSIGN));
   const safeAssignee = canAssign ? body.assignedToId : null;
   const safeReviewer = canAssign ? body.reviewerId : null;
   const safeSupporter = canAssign ? body.supporterId : null;
@@ -187,11 +199,12 @@ router.post("/", requirePermission("task.create"), async (req, res) => {
   res.status(201).json({ task });
 });
 
-router.delete("/:id", requirePermission("task.update"), async (req, res) => {
+router.delete("/:id", requirePermission(P.TASKS_UPDATE), async (req, res) => {
   const ok = await taskService.deleteTask(
     req.userId!,
     req.tenantId!,
     String(req.params.id),
+    deptScope(req),
   );
   if (!ok) {
     res.status(404).json({ error: "Not found" });
@@ -200,7 +213,7 @@ router.delete("/:id", requirePermission("task.update"), async (req, res) => {
   res.status(204).send();
 });
 
-router.patch("/:id", requirePermission("task.update"), async (req, res) => {
+router.patch("/:id", requirePermission(P.TASKS_UPDATE), async (req, res) => {
   const body = z
     .object({
       title: z.string().optional(),
@@ -223,7 +236,7 @@ router.patch("/:id", requirePermission("task.update"), async (req, res) => {
         ? new Date(s)
         : null;
 
-  const canAssign = Boolean(req.effectivePermissions?.has("task.assign"));
+  const canAssign = Boolean(req.effectivePermissions?.has(P.TASKS_ASSIGN));
   const safeBody = {
     ...body,
     ...(canAssign
@@ -250,6 +263,7 @@ router.patch("/:id", requirePermission("task.update"), async (req, res) => {
           ? undefined
           : parseOptDate(safeBody.dueDate ?? undefined),
     },
+    deptScope(req),
   );
   if (!task) {
     res.status(404).json({ error: "Not found" });
@@ -260,7 +274,7 @@ router.patch("/:id", requirePermission("task.update"), async (req, res) => {
 
 router.post(
   "/:id/review",
-  requirePermission("task.review"),
+  requirePermission(P.TASKS_REVIEW),
   async (req, res) => {
     const body = z
       .object({
@@ -285,7 +299,7 @@ router.post(
 
 router.post(
   "/:id/accept",
-  requirePermission("task.update"),
+  requirePermission(P.TASKS_UPDATE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const task = await taskService.acceptTask(
@@ -303,7 +317,7 @@ router.post(
 
 router.post(
   "/:id/start",
-  requirePermission("task.update"),
+  requirePermission(P.TASKS_UPDATE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const task = await taskService.startTask(
@@ -321,7 +335,7 @@ router.post(
 
 router.post(
   "/:id/time-log",
-  requirePermission("task.update"),
+  requirePermission(P.TASKS_UPDATE),
   async (req, res) => {
     const body = z
       .object({ minutes: z.number().int().positive() })
@@ -331,6 +345,7 @@ router.post(
       req.tenantId!,
       String(req.params.id),
       body.minutes,
+      deptScope(req),
     );
     if (!entry) {
       res.status(404).json({ error: "Not found" });
@@ -342,7 +357,7 @@ router.post(
 
 router.post(
   "/:id/comments",
-  requirePermission("task.update"),
+  requirePermission(P.TASKS_UPDATE),
   async (req, res) => {
     const body = z.object({ message: z.string().min(1) }).parse(req.body);
     const c = await taskService.addComment(
@@ -350,6 +365,7 @@ router.post(
       req.tenantId!,
       String(req.params.id),
       body.message,
+      deptScope(req),
     );
     if (!c) {
       res.status(404).json({ error: "Not found" });
@@ -361,7 +377,7 @@ router.post(
 
 router.post(
   "/:id/attachments",
-  requirePermission("task.update"),
+  requirePermission(P.TASKS_UPDATE),
   upload.single("file"),
   async (req, res) => {
     if (!req.file) {
@@ -378,6 +394,8 @@ router.post(
       publicUrl,
       req.file.originalname,
       req.file.mimetype,
+      undefined,
+      deptScope(req),
     );
     if (!att) {
       res.status(404).json({ error: "Not found" });
@@ -389,13 +407,14 @@ router.post(
 
 router.get(
   "/:id/checklist",
-  requirePermission("task.update"),
+  requirePermission(P.TASKS_UPDATE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const items = await taskService.listTaskChecklistItems(
       req.userId!,
       req.tenantId!,
       params.id,
+      deptScope(req),
     );
     if (!items) {
       res.status(404).json({ error: "Not found" });
@@ -407,7 +426,7 @@ router.get(
 
 router.post(
   "/:id/checklist/apply-template",
-  requirePermission("task.update"),
+  requirePermission(P.TASKS_UPDATE),
   async (req, res) => {
     const params = z.object({ id: z.string().min(1) }).parse(req.params);
     const body = z.object({ templateId: z.string().min(1) }).parse(req.body);
@@ -416,6 +435,7 @@ router.post(
       req.tenantId!,
       params.id,
       body.templateId,
+      deptScope(req),
     );
     if (!items) {
       res.status(404).json({ error: "Not found" });
@@ -427,7 +447,7 @@ router.post(
 
 router.patch(
   "/:id/checklist/:itemId",
-  requirePermission("task.update"),
+  requirePermission(P.TASKS_UPDATE),
   async (req, res) => {
     const params = z
       .object({ id: z.string().min(1), itemId: z.string().min(1) })
@@ -444,6 +464,7 @@ router.patch(
       params.id,
       params.itemId,
       body,
+      deptScope(req),
     );
     if (!item) {
       res.status(404).json({ error: "Not found" });
@@ -455,7 +476,7 @@ router.patch(
 
 router.post(
   "/:id/checklist/:itemId/attachments",
-  requirePermission("task.update"),
+  requirePermission(P.TASKS_UPDATE),
   upload.single("file"),
   async (req, res) => {
     const params = z
@@ -476,6 +497,7 @@ router.post(
       req.file.originalname,
       req.file.mimetype,
       params.itemId,
+      deptScope(req),
     );
     if (!att) {
       res.status(404).json({ error: "Not found" });

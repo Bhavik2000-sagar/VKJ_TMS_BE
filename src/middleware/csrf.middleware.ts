@@ -16,16 +16,16 @@ export const csrfBootstrap: RequestHandler = (req, res) => {
 };
 
 export const csrfProtect: RequestHandler = (req, res, next) => {
-  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
+  if (
+    req.method === "GET" ||
+    req.method === "HEAD" ||
+    req.method === "OPTIONS"
+  ) {
     next();
     return;
   }
   const url = req.originalUrl || req.url;
-  if (
-    url.includes("/auth/login") ||
-    url.includes("/auth/refresh") ||
-    url.includes("/auth/accept-invite")
-  ) {
+  if (url.includes("/auth/login") || url.includes("/auth/refresh")) {
     next();
     return;
   }

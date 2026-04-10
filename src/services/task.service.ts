@@ -4,11 +4,15 @@ import { getEffectivePermissionActions } from "./permission.service.js";
 import { getSubordinateIds } from "./hierarchy.service.js";
 import * as notificationService from "./notification.service.js";
 import { emitToUser } from "../socketHub.js";
+import { P } from "../constants/permissions.js";
+
+type DepartmentScopeIds = string[] | null | undefined;
 
 async function canViewTask(
   userId: string,
   tenantId: string | null,
   task: { id: string },
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
   const full = await prisma.task.findFirst({
     where: { id: task.id, tenantId: tenantId ?? undefined },
@@ -17,6 +21,7 @@ async function canViewTask(
       reviewerId: true,
       supporterId: true,
       createdById: true,
+      departmentId: true,
     },
   });
   if (!full) return false;
@@ -29,7 +34,12 @@ async function canViewTask(
     return true;
   }
   const perms = await getEffectivePermissionActions(userId);
-  if (!perms.has("team.view")) return false;
+  if (!perms.has(P.USERS_READ)) return false;
+  if (departmentScopeIds?.length) {
+    if (!full.departmentId || !departmentScopeIds.includes(full.departmentId)) {
+      return false;
+    }
+  }
   const subs = await getSubordinateIds(userId);
   const scope = new Set([userId, ...subs]);
   if (full.assignedToId && scope.has(full.assignedToId)) return true;
@@ -40,6 +50,7 @@ async function canViewTask(
 async function taskVisibilityOrClause(
   userId: string,
   tenantId: string,
+  departmentScopeIds?: DepartmentScopeIds,
 ): Promise<Prisma.TaskWhereInput[]> {
   const perms = await getEffectivePermissionActions(userId);
   const subs = await getSubordinateIds(userId);
@@ -51,9 +62,18 @@ async function taskVisibilityOrClause(
     { supporterId: userId },
     { createdById: userId },
   ];
-  if (perms.has("team.view")) {
-    or.push({ assignedToId: { in: Array.from(scopeIds) } });
-    or.push({ createdById: { in: Array.from(scopeIds) } });
+  if (perms.has(P.USERS_READ)) {
+    const subTeam: Prisma.TaskWhereInput[] = [
+      { assignedToId: { in: Array.from(scopeIds) } },
+      { createdById: { in: Array.from(scopeIds) } },
+    ];
+    if (departmentScopeIds?.length) {
+      or.push({
+        AND: [{ OR: subTeam }, { departmentId: { in: departmentScopeIds } }],
+      });
+    } else {
+      or.push(...subTeam);
+    }
   }
   return or;
 }
@@ -89,16 +109,20 @@ function taskListOrderBy(
   }
 }
 
-export async function listTasks(userId: string, tenantId: string) {
-  const or = await taskVisibilityOrClause(userId, tenantId);
+export async function listTasks(
+  userId: string,
+  tenantId: string,
+  departmentScopeIds?: DepartmentScopeIds,
+) {
+  const or = await taskVisibilityOrClause(userId, tenantId, departmentScopeIds);
 
   return prisma.task.findMany({
     where: { tenantId, OR: or },
     include: {
       status: true,
-      assignedTo: { select: { id: true, name: true, email: true } },
-      reviewer: { select: { id: true, name: true, email: true } },
-      createdBy: { select: { id: true, name: true, email: true } },
+      assignedTo: { select: { id: true, name: true, username: true } },
+      reviewer: { select: { id: true, name: true, username: true } },
+      createdBy: { select: { id: true, name: true, username: true } },
     },
     orderBy: { updatedAt: "desc" },
   });
@@ -145,8 +169,9 @@ export async function listTasksPaginated(
     sortBy?: TaskListSortField;
     sortDir?: "asc" | "desc";
   },
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
-  const or = await taskVisibilityOrClause(userId, tenantId);
+  const or = await taskVisibilityOrClause(userId, tenantId, departmentScopeIds);
   const andFilters: Prisma.TaskWhereInput[] = [];
 
   const qf = queueFilter(userId, params.queue);
@@ -179,9 +204,9 @@ export async function listTasksPaginated(
 
   const include = {
     status: true,
-    assignedTo: { select: { id: true, name: true, email: true } },
-    reviewer: { select: { id: true, name: true, email: true } },
-    createdBy: { select: { id: true, name: true, email: true } },
+    assignedTo: { select: { id: true, name: true, username: true } },
+    reviewer: { select: { id: true, name: true, username: true } },
+    createdBy: { select: { id: true, name: true, username: true } },
   } as const;
 
   const [tasks, total] = await Promise.all([
@@ -207,24 +232,25 @@ export async function getTask(
   userId: string,
   tenantId: string,
   taskId: string,
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
   const task = await prisma.task.findFirst({
     where: { id: taskId, tenantId },
     include: {
       status: true,
-      assignedTo: { select: { id: true, name: true, email: true } },
-      reviewer: { select: { id: true, name: true, email: true } },
-      supporter: { select: { id: true, name: true, email: true } },
-      createdBy: { select: { id: true, name: true, email: true } },
+      assignedTo: { select: { id: true, name: true, username: true } },
+      reviewer: { select: { id: true, name: true, username: true } },
+      supporter: { select: { id: true, name: true, username: true } },
+      createdBy: { select: { id: true, name: true, username: true } },
       activities: {
-        include: { user: { select: { id: true, name: true, email: true } } },
+        include: { user: { select: { id: true, name: true, username: true } } },
         orderBy: { createdAt: "asc" },
       },
       attachments: true,
     },
   });
   if (!task) return null;
-  const ok = await canViewTask(userId, tenantId, task);
+  const ok = await canViewTask(userId, tenantId, task, departmentScopeIds);
   if (!ok) return null;
   return task;
 }
@@ -305,12 +331,13 @@ export async function updateTask(
     dueDate: Date | null;
     estimatedMinutes: number | null;
   }>,
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
   const existing = await prisma.task.findFirst({
     where: { id: taskId, tenantId },
   });
   if (!existing) return null;
-  const ok = await canViewTask(userId, tenantId, existing);
+  const ok = await canViewTask(userId, tenantId, existing, departmentScopeIds);
   if (!ok) return null;
 
   const task = await prisma.task.update({
@@ -522,12 +549,13 @@ export async function addTimeLog(
   tenantId: string,
   taskId: string,
   minutes: number,
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
   const existing = await prisma.task.findFirst({
     where: { id: taskId, tenantId },
   });
   if (!existing) return null;
-  const ok = await canViewTask(userId, tenantId, existing);
+  const ok = await canViewTask(userId, tenantId, existing, departmentScopeIds);
   if (!ok) return null;
   return prisma.taskActivity.create({
     data: {
@@ -545,6 +573,7 @@ export async function addComment(
   tenantId: string,
   taskId: string,
   message: string,
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
   const existing = await prisma.task.findFirst({
     where: { id: taskId, tenantId },
@@ -558,7 +587,7 @@ export async function addComment(
     },
   });
   if (!existing) return null;
-  const ok = await canViewTask(userId, tenantId, existing);
+  const ok = await canViewTask(userId, tenantId, existing, departmentScopeIds);
   if (!ok) return null;
   const activity = await prisma.taskActivity.create({
     data: {
@@ -599,12 +628,13 @@ export async function addAttachment(
   fileName?: string,
   mimeType?: string,
   checklistItemId?: string | null,
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
   const existing = await prisma.task.findFirst({
     where: { id: taskId, tenantId },
   });
   if (!existing) return null;
-  const ok = await canViewTask(userId, tenantId, existing);
+  const ok = await canViewTask(userId, tenantId, existing, departmentScopeIds);
   if (!ok) return null;
   return prisma.attachment.create({
     data: {
@@ -622,10 +652,11 @@ export async function applyTemplateChecklistToTask(
   tenantId: string,
   taskId: string,
   templateId: string,
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
   const task = await prisma.task.findFirst({ where: { id: taskId, tenantId } });
   if (!task) return null;
-  const ok = await canViewTask(userId, tenantId, task);
+  const ok = await canViewTask(userId, tenantId, task, departmentScopeIds);
   if (!ok) return null;
 
   const template = await prisma.template.findFirst({
@@ -682,10 +713,11 @@ export async function listTaskChecklistItems(
   userId: string,
   tenantId: string,
   taskId: string,
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
   const task = await prisma.task.findFirst({ where: { id: taskId, tenantId } });
   if (!task) return null;
-  const ok = await canViewTask(userId, tenantId, task);
+  const ok = await canViewTask(userId, tenantId, task, departmentScopeIds);
   if (!ok) return null;
 
   const items = await prisma.taskChecklistItem.findMany({
@@ -700,7 +732,7 @@ export async function listTaskChecklistItems(
       checkedAt: true,
       checkedById: true,
       remarks: true,
-      checkedBy: { select: { id: true, name: true, email: true } },
+      checkedBy: { select: { id: true, name: true, username: true } },
       attachments: {
         select: {
           id: true,
@@ -723,10 +755,11 @@ export async function updateTaskChecklistItem(
   taskId: string,
   itemId: string,
   data: { isChecked?: boolean; remarks?: string | null },
+  departmentScopeIds?: DepartmentScopeIds,
 ) {
   const task = await prisma.task.findFirst({ where: { id: taskId, tenantId } });
   if (!task) return null;
-  const ok = await canViewTask(userId, tenantId, task);
+  const ok = await canViewTask(userId, tenantId, task, departmentScopeIds);
   if (!ok) return null;
 
   const existing = await prisma.taskChecklistItem.findFirst({
@@ -787,10 +820,10 @@ export async function deleteTask(
   userId: string,
   tenantId: string,
   taskId: string,
+  departmentScopeIds?: DepartmentScopeIds,
 ): Promise<boolean> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    include: { role: true },
   });
   if (!user || user.tenantId !== tenantId) return false;
 
@@ -798,15 +831,11 @@ export async function deleteTask(
     where: { id: taskId, tenantId },
   });
   if (!existing) return false;
-  const ok = await canViewTask(userId, tenantId, existing);
+  const ok = await canViewTask(userId, tenantId, existing, departmentScopeIds);
   if (!ok) return false;
 
-  // Staff/Supporter can delete tasks only if they created them.
-  const roleCode = user.role?.code ?? null;
-  if (
-    (roleCode === "STAFF" || roleCode === "SUPPORTER") &&
-    existing.createdById !== userId
-  ) {
+  const perms = await getEffectivePermissionActions(userId);
+  if (!perms.has(P.TASKS_DELETE) && existing.createdById !== userId) {
     return false;
   }
 
